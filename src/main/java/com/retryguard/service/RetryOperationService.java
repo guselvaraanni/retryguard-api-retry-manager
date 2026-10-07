@@ -7,22 +7,28 @@ import java.util.List;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 
+import com.retryguard.dto.RetryAttemptResponse;
 import com.retryguard.dto.RetryOperationRequest;
 import com.retryguard.dto.RetryOperationResponse;
 import com.retryguard.entity.OperationStatus;
 import com.retryguard.entity.RetryOperation;
 import com.retryguard.exception.InvalidOperationStateException;
 import com.retryguard.exception.RetryOperationNotFoundException;
+import com.retryguard.repository.RetryAttemptRepository;
 import com.retryguard.repository.RetryOperationRepository;
 
 @Service
 public class RetryOperationService {
 
     private final RetryOperationRepository repository;
+    private final RetryAttemptRepository attemptRepository;
     private final Clock clock;
 
-    public RetryOperationService(RetryOperationRepository repository, Clock clock) {
+    public RetryOperationService(RetryOperationRepository repository,
+                                 RetryAttemptRepository attemptRepository,
+                                 Clock clock) {
         this.repository = repository;
+        this.attemptRepository = attemptRepository;
         this.clock = clock;
     }
 
@@ -45,6 +51,15 @@ public class RetryOperationService {
 
     public RetryOperationResponse findById(Long id) {
         return RetryOperationResponse.from(findOperationOrThrow(id));
+    }
+
+    public List<RetryAttemptResponse> findAttempts(Long id) {
+        if (!repository.existsById(id)) {
+            throw new RetryOperationNotFoundException(id);
+        }
+        return attemptRepository.findByOperationId(id).stream()
+                .map(RetryAttemptResponse::from)
+                .toList();
     }
 
     public RetryOperationResponse update(Long id, RetryOperationRequest request) {

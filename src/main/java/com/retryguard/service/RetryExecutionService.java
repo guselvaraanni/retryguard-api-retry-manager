@@ -2,31 +2,38 @@ package com.retryguard.service;
 
 import java.time.Clock;
 import java.time.LocalDateTime;
+import java.util.List;
 
 import org.springframework.stereotype.Service;
 
 import com.retryguard.dto.RetryOperationResponse;
+import com.retryguard.entity.AttemptStatus;
 import com.retryguard.entity.OperationStatus;
+import com.retryguard.entity.RetryAttempt;
 import com.retryguard.entity.RetryOperation;
 import com.retryguard.exception.InvalidOperationStateException;
+import com.retryguard.repository.RetryAttemptRepository;
 import com.retryguard.repository.RetryOperationRepository;
 
 @Service
 public class RetryExecutionService {
 
     private final RetryOperationService operationService;
-    private final RetryOperationRepository repository;
+    private final RetryOperationRepository operationRepository;
+    private final RetryAttemptRepository attemptRepository;
     private final RetryEngine retryEngine;
     private final OperationSimulator simulator;
     private final Clock clock;
 
     public RetryExecutionService(RetryOperationService operationService,
-                                 RetryOperationRepository repository,
+                                 RetryOperationRepository operationRepository,
+                                 RetryAttemptRepository attemptRepository,
                                  RetryEngine retryEngine,
                                  OperationSimulator simulator,
                                  Clock clock) {
         this.operationService = operationService;
-        this.repository = repository;
+        this.operationRepository = operationRepository;
+        this.attemptRepository = attemptRepository;
         this.retryEngine = retryEngine;
         this.simulator = simulator;
         this.clock = clock;
@@ -39,19 +46,33 @@ public class RetryExecutionService {
         }
 
         operation.markRunning(LocalDateTime.now(clock));
-        repository.save(operation);
+        RetryOperation running = operationRepository.save(operation);
 
         RetryOutcome outcome = retryEngine.run(
-                operation.getMaxRetries(),
-                operation.getInitialDelayMs(),
-                attempt -> simulator.call(operation, attempt));
+                running.getMaxRetries(),
+                running.getInitialDelayMs(),
+                attempt -> simulator.call(running, attempt));
+
+        attemptRepository.saveAll(toEntities(running, outcome.attempts()));
 
         LocalDateTime completedAt = LocalDateTime.now(clock);
         if (outcome.succeeded()) {
-            operation.markSucceeded(outcome.attempts(), outcome.lastError(), completedAt);
+            running.markSucceeded(outcome.attemptCount(), outcome.lastError(), completedAt);
         } else {
-            operation.markFailed(outcome.attempts(), outcome.lastError(), completedAt);
+            running.markFailed(outcome.attemptCount(), outcome.lastError(), completedAt);
         }
-        return RetryOperationResponse.from(repository.save(operation));
+        return RetryOperationResponse.from(operationRepository.save(running));
+    }
+
+    private List<RetryAttempt> toEntities(RetryOperation operation, List<AttemptRecord> records) {
+        return records.stream()
+                .map(record -> new RetryAttempt(
+                        operation,
+                        record.attemptNumber(),
+                        record.succeeded() ? AttemptStatus.SUCCESS : AttemptStatus.FAILED,
+                        record.errorMessage(),
+                        record.startedAt(),
+                        record.completedAt()))
+                .toList();
     }
 }

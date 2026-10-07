@@ -14,6 +14,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
+import com.retryguard.dto.RetryAttemptResponse;
 import com.retryguard.dto.RetryOperationRequest;
 import com.retryguard.dto.RetryOperationResponse;
 import com.retryguard.service.RetryOperationService;
@@ -48,6 +49,11 @@ public class RetryOperationController {
     @GetMapping("/{id}")
     public RetryOperationResponse findById(@PathVariable Long id) {
         return service.findById(id);
+    }
+
+    @GetMapping("/{id}/attempts")
+    public List<RetryAttemptResponse> findAttempts(@PathVariable Long id) {
+        return service.findAttempts(id);
     }
 
     @PutMapping("/{id}")

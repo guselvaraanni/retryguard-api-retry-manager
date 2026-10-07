@@ -1,7 +1,12 @@
 package com.retryguard.entity;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
 
+import com.retryguard.util.TextUtils;
+
+import jakarta.persistence.CascadeType;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -9,6 +14,7 @@ import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.OneToMany;
 import jakarta.persistence.Table;
 
 @Entity
@@ -59,6 +65,11 @@ public class RetryOperation {
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;
 
+    // Inverse side: RetryAttempt.retryOperation owns the foreign key. Mapped so that deleting
+    // an operation also deletes its attempts; attempts are read via RetryAttemptRepository.
+    @OneToMany(mappedBy = "retryOperation", cascade = CascadeType.REMOVE)
+    private List<RetryAttempt> attempts = new ArrayList<>();
+
     protected RetryOperation() {
         // required by JPA
     }
@@ -92,7 +103,7 @@ public class RetryOperation {
     public void markSucceeded(int attempts, String lastError, LocalDateTime completedAt) {
         this.status = OperationStatus.SUCCESS;
         this.totalAttempts = attempts;
-        this.lastError = truncate(lastError);
+        this.lastError = TextUtils.truncate(lastError, MAX_ERROR_LENGTH);
         this.recovered = attempts > 1;
         this.completedAt = completedAt;
     }
@@ -100,16 +111,9 @@ public class RetryOperation {
     public void markFailed(int attempts, String lastError, LocalDateTime completedAt) {
         this.status = OperationStatus.FAILED;
         this.totalAttempts = attempts;
-        this.lastError = truncate(lastError);
+        this.lastError = TextUtils.truncate(lastError, MAX_ERROR_LENGTH);
         this.recovered = false;
         this.completedAt = completedAt;
-    }
-
-    private static String truncate(String message) {
-        if (message == null || message.length() <= MAX_ERROR_LENGTH) {
-            return message;
-        }
-        return message.substring(0, MAX_ERROR_LENGTH);
     }
 
     public Long getId() {

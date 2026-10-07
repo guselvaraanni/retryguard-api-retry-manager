@@ -5,7 +5,7 @@ RetryGuard is a Spring Boot backend service that tracks backend operations and h
 **exponential backoff**. Every attempt is recorded, so you can see what failed, why,
 how long it took, and whether the operation eventually recovered.
 
-> Status: **Stage 6 — retry engine with exponential backoff (no execute endpoint yet).** Runs on `http://localhost:8082`
+> Status: **Stage 7 — retry attempt history (`GET /api/operations/{id}/attempts`); execute endpoint comes in Stage 8.** Runs on `http://localhost:8082`
 > (`.\mvnw.cmd spring-boot:run`). Copy `.env.example` to `.env` and set your local
 > PostgreSQL credentials first. Import `postman/RetryGuard.postman_collection.json` into Postman.
 

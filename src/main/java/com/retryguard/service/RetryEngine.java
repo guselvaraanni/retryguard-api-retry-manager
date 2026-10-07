@@ -1,5 +1,9 @@
 package com.retryguard.service;
 
+import java.time.Clock;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.function.IntConsumer;
 
 import org.slf4j.Logger;
@@ -21,9 +25,11 @@ public class RetryEngine {
     private static final Logger log = LoggerFactory.getLogger(RetryEngine.class);
 
     private final RetryProperties properties;
+    private final Clock clock;
 
-    public RetryEngine(RetryProperties properties) {
+    public RetryEngine(RetryProperties properties, Clock clock) {
         this.properties = properties;
+        this.clock = clock;
     }
 
     public RetryOutcome run(int maxAttempts, long initialDelayMs, IntConsumer action) {
@@ -31,33 +37,39 @@ public class RetryEngine {
             throw new IllegalArgumentException("maxAttempts must be at least 1 but was " + maxAttempts);
         }
 
+        List<AttemptRecord> attempts = new ArrayList<>();
         String lastError = null;
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            LocalDateTime startedAt = LocalDateTime.now(clock);
             try {
                 action.accept(attempt);
+                attempts.add(new AttemptRecord(attempt, true, null, startedAt, LocalDateTime.now(clock)));
                 log.info("Attempt {}/{} succeeded", attempt, maxAttempts);
-                return new RetryOutcome(true, attempt, lastError);
+                return new RetryOutcome(true, lastError, attempts);
             } catch (TransientOperationException ex) {
                 lastError = ex.getMessage();
+                attempts.add(new AttemptRecord(attempt, false, lastError, startedAt, LocalDateTime.now(clock)));
                 log.warn("Attempt {}/{} failed (transient): {}", attempt, maxAttempts, lastError);
             } catch (RuntimeException ex) {
                 lastError = describe(ex);
+                attempts.add(new AttemptRecord(attempt, false, lastError, startedAt, LocalDateTime.now(clock)));
                 log.warn("Attempt {}/{} failed (permanent, not retrying): {}", attempt, maxAttempts, lastError);
-                return new RetryOutcome(false, attempt, lastError);
+                return new RetryOutcome(false, lastError, attempts);
             }
 
             if (attempt < maxAttempts) {
                 long delayMs = BackoffCalculator.delayForAttempt(initialDelayMs, attempt, properties.maxDelayMs());
                 log.info("Waiting {} ms before attempt {}", delayMs, attempt + 1);
                 if (!sleep(delayMs)) {
-                    return new RetryOutcome(false, attempt,
-                            "Retry interrupted after attempt " + attempt + "; last error: " + lastError);
+                    return new RetryOutcome(false,
+                            "Retry interrupted after attempt " + attempt + "; last error: " + lastError,
+                            attempts);
                 }
             }
         }
 
         log.warn("All {} attempts failed", maxAttempts);
-        return new RetryOutcome(false, maxAttempts, lastError);
+        return new RetryOutcome(false, lastError, attempts);
     }
 
     private boolean sleep(long delayMs) {

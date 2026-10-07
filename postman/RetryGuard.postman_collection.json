@@ -59,6 +59,13 @@
           }
         },
         {
+          "name": "Get attempt history",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/operations/{{operationId}}/attempts"
+          }
+        },
+        {
           "name": "Update operation",
           "request": {
             "method": "PUT",
