@@ -68,7 +68,7 @@ public class RetryOperationService {
         repository.delete(operation);
     }
 
-    private RetryOperation findOperationOrThrow(Long id) {
+    public RetryOperation findOperationOrThrow(Long id) {
         return repository.findById(id)
                 .orElseThrow(() -> new RetryOperationNotFoundException(id));
     }
