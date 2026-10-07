@@ -1,0 +1,102 @@
+{
+  "info": {
+    "name": "RetryGuard",
+    "description": "RetryGuard - Smart API Retry & Failure Tracker",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8082" },
+    { "key": "operationId", "value": "1" }
+  ],
+  "item": [
+    {
+      "name": "Ping",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/api/ping"
+      }
+    },
+    {
+      "name": "Operations",
+      "item": [
+        {
+          "name": "Create operation",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "    pm.collectionVariables.set('operationId', pm.response.json().id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/operations",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"operationName\": \"Charge payment #42\",\n  \"operationType\": \"PAYMENT\",\n  \"maxRetries\": 3,\n  \"initialDelayMs\": 100,\n  \"failuresBeforeSuccess\": 2\n}"
+            }
+          }
+        },
+        {
+          "name": "List operations",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/operations"
+          }
+        },
+        {
+          "name": "Get operation",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/operations/{{operationId}}"
+          }
+        },
+        {
+          "name": "Update operation",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/operations/{{operationId}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"operationName\": \"Charge payment #42 (updated)\",\n  \"operationType\": \"PAYMENT\",\n  \"maxRetries\": 5,\n  \"initialDelayMs\": 200,\n  \"failuresBeforeSuccess\": 1\n}"
+            }
+          }
+        },
+        {
+          "name": "Delete operation",
+          "request": {
+            "method": "DELETE",
+            "url": "{{baseUrl}}/api/operations/{{operationId}}"
+          }
+        },
+        {
+          "name": "Create operation - invalid",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/operations",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"operationName\": \"\",\n  \"operationType\": \"PAYMENT\",\n  \"maxRetries\": 0,\n  \"initialDelayMs\": 100000,\n  \"failuresBeforeSuccess\": -1\n}"
+            }
+          }
+        },
+        {
+          "name": "Get operation - not found",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/operations/9999"
+          }
+        }
+      ]
+    }
+  ]
+}
