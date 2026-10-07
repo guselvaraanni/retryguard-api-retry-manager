@@ -52,6 +52,13 @@
           }
         },
         {
+          "name": "Statistics",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/operations/statistics"
+          }
+        },
+        {
           "name": "Get operation",
           "request": {
             "method": "GET",

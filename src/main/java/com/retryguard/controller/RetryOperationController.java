@@ -18,8 +18,10 @@ import com.retryguard.dto.ExecutionResultResponse;
 import com.retryguard.dto.RetryAttemptResponse;
 import com.retryguard.dto.RetryOperationRequest;
 import com.retryguard.dto.RetryOperationResponse;
+import com.retryguard.dto.RetryStatisticsResponse;
 import com.retryguard.service.RetryExecutionService;
 import com.retryguard.service.RetryOperationService;
+import com.retryguard.service.RetryStatisticsService;
 
 import jakarta.validation.Valid;
 
@@ -29,10 +31,14 @@ public class RetryOperationController {
 
     private final RetryOperationService service;
     private final RetryExecutionService executionService;
+    private final RetryStatisticsService statisticsService;
 
-    public RetryOperationController(RetryOperationService service, RetryExecutionService executionService) {
+    public RetryOperationController(RetryOperationService service,
+                                    RetryExecutionService executionService,
+                                    RetryStatisticsService statisticsService) {
         this.service = service;
         this.executionService = executionService;
+        this.statisticsService = statisticsService;
     }
 
     @PostMapping
@@ -48,6 +54,11 @@ public class RetryOperationController {
     @GetMapping
     public List<RetryOperationResponse> findAll() {
         return service.findAll();
+    }
+
+    @GetMapping("/statistics")
+    public RetryStatisticsResponse statistics() {
+        return statisticsService.getStatistics();
     }
 
     @GetMapping("/{id}")
