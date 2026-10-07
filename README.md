@@ -5,7 +5,8 @@ RetryGuard is a Spring Boot backend service that tracks backend operations and h
 **exponential backoff**. Every attempt is recorded, so you can see what failed, why,
 how long it took, and whether the operation eventually recovered.
 
-> Status: **Stage 0 — architecture defined.** Application code starts in Stage 1.
+> Status: **Stage 1 — Spring Boot project initialized.** Runs on `http://localhost:8082`
+> (`.\mvnw.cmd spring-boot:run`), health check at `GET /api/ping`.
 
 ---
 
@@ -65,7 +66,7 @@ Postman demo produces the same result.
 | Framework   | Spring Boot 3.x (Spring MVC, Spring Data JPA, Bean Validation) |
 | ORM         | Hibernate (via Spring Data JPA)          |
 | Database    | PostgreSQL                               |
-| Build       | Maven                                    |
+| Build       | Maven (via Maven Wrapper `mvnw`)         |
 | Tools       | Git, Postman                             |
 
 Intentionally **not** used: Resilience4j, Spring Retry, Spring Cloud, Kafka, RabbitMQ,
