@@ -43,6 +43,7 @@ public class RetryExecutionService {
 
         RetryOutcome outcome = retryEngine.run(
                 operation.getMaxRetries(),
+                operation.getInitialDelayMs(),
                 attempt -> simulator.call(operation, attempt));
 
         LocalDateTime completedAt = LocalDateTime.now(clock);
