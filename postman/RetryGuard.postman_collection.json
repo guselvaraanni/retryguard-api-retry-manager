@@ -90,10 +90,29 @@
           }
         },
         {
+          "name": "Create operation - invalid enum",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/operations",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"operationName\": \"Bad type\",\n  \"operationType\": \"FAX\",\n  \"maxRetries\": 3,\n  \"initialDelayMs\": 100,\n  \"failuresBeforeSuccess\": 0\n}"
+            }
+          }
+        },
+        {
           "name": "Get operation - not found",
           "request": {
             "method": "GET",
             "url": "{{baseUrl}}/api/operations/9999"
+          }
+        },
+        {
+          "name": "Get operation - invalid id",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/operations/abc"
           }
         }
       ]

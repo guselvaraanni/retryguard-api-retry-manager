@@ -46,24 +46,19 @@ public class RetryOperationController {
     }
 
     @GetMapping("/{id}")
-    public ResponseEntity<RetryOperationResponse> findById(@PathVariable Long id) {
-        return service.findById(id)
-                .map(ResponseEntity::ok)
-                .orElse(ResponseEntity.notFound().build());
+    public RetryOperationResponse findById(@PathVariable Long id) {
+        return service.findById(id);
     }
 
     @PutMapping("/{id}")
-    public ResponseEntity<RetryOperationResponse> update(@PathVariable Long id,
-                                                         @Valid @RequestBody RetryOperationRequest request) {
-        return service.update(id, request)
-                .map(ResponseEntity::ok)
-                .orElse(ResponseEntity.notFound().build());
+    public RetryOperationResponse update(@PathVariable Long id,
+                                         @Valid @RequestBody RetryOperationRequest request) {
+        return service.update(id, request);
     }
 
     @DeleteMapping("/{id}")
     public ResponseEntity<Void> delete(@PathVariable Long id) {
-        return service.delete(id)
-                ? ResponseEntity.noContent().build()
-                : ResponseEntity.notFound().build();
+        service.delete(id);
+        return ResponseEntity.noContent().build();
     }
 }

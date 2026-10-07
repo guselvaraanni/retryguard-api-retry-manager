@@ -3,14 +3,16 @@ package com.retryguard.service;
 import java.time.Clock;
 import java.time.LocalDateTime;
 import java.util.List;
-import java.util.Optional;
 
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 
 import com.retryguard.dto.RetryOperationRequest;
 import com.retryguard.dto.RetryOperationResponse;
+import com.retryguard.entity.OperationStatus;
 import com.retryguard.entity.RetryOperation;
+import com.retryguard.exception.InvalidOperationStateException;
+import com.retryguard.exception.RetryOperationNotFoundException;
 import com.retryguard.repository.RetryOperationRepository;
 
 @Service
@@ -41,26 +43,33 @@ public class RetryOperationService {
                 .toList();
     }
 
-    public Optional<RetryOperationResponse> findById(Long id) {
-        return repository.findById(id).map(RetryOperationResponse::from);
+    public RetryOperationResponse findById(Long id) {
+        return RetryOperationResponse.from(findOperationOrThrow(id));
     }
 
-    public Optional<RetryOperationResponse> update(Long id, RetryOperationRequest request) {
-        return repository.findById(id).map(operation -> {
-            operation.setOperationName(request.operationName().trim());
-            operation.setOperationType(request.operationType());
-            operation.setMaxRetries(request.maxRetries());
-            operation.setInitialDelayMs(request.initialDelayMs());
-            operation.setFailuresBeforeSuccess(request.failuresBeforeSuccess());
-            return RetryOperationResponse.from(repository.save(operation));
-        });
-    }
-
-    public boolean delete(Long id) {
-        if (!repository.existsById(id)) {
-            return false;
+    public RetryOperationResponse update(Long id, RetryOperationRequest request) {
+        RetryOperation operation = findOperationOrThrow(id);
+        if (operation.getStatus() != OperationStatus.PENDING) {
+            throw new InvalidOperationStateException(id, operation.getStatus(), "updated");
         }
-        repository.deleteById(id);
-        return true;
+        operation.setOperationName(request.operationName().trim());
+        operation.setOperationType(request.operationType());
+        operation.setMaxRetries(request.maxRetries());
+        operation.setInitialDelayMs(request.initialDelayMs());
+        operation.setFailuresBeforeSuccess(request.failuresBeforeSuccess());
+        return RetryOperationResponse.from(repository.save(operation));
+    }
+
+    public void delete(Long id) {
+        RetryOperation operation = findOperationOrThrow(id);
+        if (operation.getStatus() == OperationStatus.RUNNING) {
+            throw new InvalidOperationStateException(id, operation.getStatus(), "deleted");
+        }
+        repository.delete(operation);
+    }
+
+    private RetryOperation findOperationOrThrow(Long id) {
+        return repository.findById(id)
+                .orElseThrow(() -> new RetryOperationNotFoundException(id));
     }
 }
