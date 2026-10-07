@@ -6,7 +6,7 @@ import java.util.List;
 
 import org.springframework.stereotype.Service;
 
-import com.retryguard.dto.RetryOperationResponse;
+import com.retryguard.dto.ExecutionResultResponse;
 import com.retryguard.entity.AttemptStatus;
 import com.retryguard.entity.OperationStatus;
 import com.retryguard.entity.RetryAttempt;
@@ -39,7 +39,7 @@ public class RetryExecutionService {
         this.clock = clock;
     }
 
-    public RetryOperationResponse execute(Long id) {
+    public ExecutionResultResponse execute(Long id) {
         RetryOperation operation = operationService.findOperationOrThrow(id);
         if (operation.getStatus() != OperationStatus.PENDING) {
             throw new InvalidOperationStateException(id, operation.getStatus(), "executed");
@@ -61,7 +61,7 @@ public class RetryExecutionService {
         } else {
             running.markFailed(outcome.attemptCount(), outcome.lastError(), completedAt);
         }
-        return RetryOperationResponse.from(operationRepository.save(running));
+        return ExecutionResultResponse.from(operationRepository.save(running));
     }
 
     private List<RetryAttempt> toEntities(RetryOperation operation, List<AttemptRecord> records) {

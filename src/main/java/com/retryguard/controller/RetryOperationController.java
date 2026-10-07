@@ -14,9 +14,11 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
+import com.retryguard.dto.ExecutionResultResponse;
 import com.retryguard.dto.RetryAttemptResponse;
 import com.retryguard.dto.RetryOperationRequest;
 import com.retryguard.dto.RetryOperationResponse;
+import com.retryguard.service.RetryExecutionService;
 import com.retryguard.service.RetryOperationService;
 
 import jakarta.validation.Valid;
@@ -26,9 +28,11 @@ import jakarta.validation.Valid;
 public class RetryOperationController {
 
     private final RetryOperationService service;
+    private final RetryExecutionService executionService;
 
-    public RetryOperationController(RetryOperationService service) {
+    public RetryOperationController(RetryOperationService service, RetryExecutionService executionService) {
         this.service = service;
+        this.executionService = executionService;
     }
 
     @PostMapping
@@ -49,6 +53,11 @@ public class RetryOperationController {
     @GetMapping("/{id}")
     public RetryOperationResponse findById(@PathVariable Long id) {
         return service.findById(id);
+    }
+
+    @PostMapping("/{id}/execute")
+    public ExecutionResultResponse execute(@PathVariable Long id) {
+        return executionService.execute(id);
     }
 
     @GetMapping("/{id}/attempts")
