@@ -1,23 +1,74 @@
 {
   "info": {
     "name": "RetryGuard",
-    "description": "RetryGuard - Smart API Retry & Failure Tracker",
+    "description": "RetryGuard - Smart API Retry & Failure Tracker.\n\nRun the whole collection top to bottom with the Collection Runner. Every scenario creates its own data, so the run does not depend on what is already in the database. Requires the app on {{baseUrl}} with retryguard.retry.max-delay-ms=2000.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
+  "event": [
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "pm.test('Response never leaks stack traces or exception details', function () {",
+          "    var text = pm.response.text();",
+          "    pm.expect(text).to.not.include('\"trace\"');",
+          "    pm.expect(text).to.not.include('Exception');",
+          "    pm.expect(text).to.not.include('at com.retryguard');",
+          "});",
+          "if (pm.response.code >= 400) {",
+          "    pm.test('Error body uses the standard ApiErrorResponse shape', function () {",
+          "        var body = pm.response.json();",
+          "        pm.expect(body).to.have.property('timestamp');",
+          "        pm.expect(body).to.have.property('error');",
+          "        pm.expect(body).to.have.property('message');",
+          "        pm.expect(body).to.have.property('path');",
+          "        pm.expect(body.status).to.eql(pm.response.code);",
+          "    });",
+          "}"
+        ]
+      }
+    }
+  ],
   "variable": [
     { "key": "baseUrl", "value": "http://localhost:8082" },
-    { "key": "operationId", "value": "1" }
+    { "key": "missingId", "value": "999999999" },
+    { "key": "operationId", "value": "" },
+    { "key": "createdAt", "value": "" },
+    { "key": "s5Id", "value": "" },
+    { "key": "s6Id", "value": "" },
+    { "key": "s7Id", "value": "" },
+    { "key": "s7CapId", "value": "" },
+    { "key": "s8Id", "value": "" },
+    { "key": "s11PendingId", "value": "" },
+    { "key": "s14Id", "value": "" },
+    { "key": "concurrentStatuses", "value": "" },
+    { "key": "expectedStats", "value": "" }
   ],
   "item": [
     {
       "name": "Ping",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Service is up', function () {",
+              "    pm.response.to.have.status(200);",
+              "    pm.expect(pm.response.json().status).to.eql('UP');",
+              "});"
+            ]
+          }
+        }
+      ],
       "request": {
         "method": "GET",
         "url": "{{baseUrl}}/api/ping"
       }
     },
     {
-      "name": "Operations",
+      "name": "01 - Create operation",
       "item": [
         {
           "name": "Create operation",
@@ -27,9 +78,27 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "if (pm.response.code === 201) {",
-                  "    pm.collectionVariables.set('operationId', pm.response.json().id);",
-                  "}"
+                  "var body = pm.response.json();",
+                  "pm.test('201 Created with a Location header pointing at the new resource', function () {",
+                  "    pm.response.to.have.status(201);",
+                  "    pm.expect(pm.response.headers.get('Location')).to.include('/api/operations/' + body.id);",
+                  "});",
+                  "pm.test('Request fields are stored as sent', function () {",
+                  "    pm.expect(body.operationName).to.eql('Charge payment #42');",
+                  "    pm.expect(body.operationType).to.eql('PAYMENT');",
+                  "    pm.expect(body.maxRetries).to.eql(3);",
+                  "    pm.expect(body.initialDelayMs).to.eql(100);",
+                  "    pm.expect(body.failuresBeforeSuccess).to.eql(2);",
+                  "});",
+                  "pm.test('New operation starts PENDING with no attempts', function () {",
+                  "    pm.expect(body.status).to.eql('PENDING');",
+                  "    pm.expect(body.totalAttempts).to.eql(0);",
+                  "    pm.expect(body.recovered).to.eql(false);",
+                  "    pm.expect(body.startedAt == null).to.be.true;",
+                  "    pm.expect(body.completedAt == null).to.be.true;",
+                  "});",
+                  "pm.collectionVariables.set('operationId', body.id);",
+                  "pm.collectionVariables.set('createdAt', body.createdAt);"
                 ]
               }
             }
@@ -43,44 +112,88 @@
               "raw": "{\n  \"operationName\": \"Charge payment #42\",\n  \"operationType\": \"PAYMENT\",\n  \"maxRetries\": 3,\n  \"initialDelayMs\": 100,\n  \"failuresBeforeSuccess\": 2\n}"
             }
           }
-        },
-        {
-          "name": "List operations",
-          "request": {
-            "method": "GET",
-            "url": "{{baseUrl}}/api/operations"
-          }
-        },
-        {
-          "name": "Statistics",
-          "request": {
-            "method": "GET",
-            "url": "{{baseUrl}}/api/operations/statistics"
-          }
-        },
+        }
+      ]
+    },
+    {
+      "name": "02 - Get operation",
+      "item": [
         {
           "name": "Get operation",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK with the created operation', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(String(body.id)).to.eql(pm.collectionVariables.get('operationId'));",
+                  "    pm.expect(body.operationName).to.eql('Charge payment #42');",
+                  "    pm.expect(body.status).to.eql('PENDING');",
+                  "});"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "GET",
             "url": "{{baseUrl}}/api/operations/{{operationId}}"
           }
         },
         {
-          "name": "Execute operation",
-          "request": {
-            "method": "POST",
-            "url": "{{baseUrl}}/api/operations/{{operationId}}/execute"
-          }
-        },
-        {
-          "name": "Get attempt history",
+          "name": "List operations",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var ids = pm.response.json().map(function (o) { return o.id; });",
+                  "pm.test('List contains the created operation, sorted by id', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(ids).to.include(Number(pm.collectionVariables.get('operationId')));",
+                  "    pm.expect(ids).to.eql(ids.slice().sort(function (a, b) { return a - b; }));",
+                  "});"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "GET",
-            "url": "{{baseUrl}}/api/operations/{{operationId}}/attempts"
+            "url": "{{baseUrl}}/api/operations"
           }
-        },
+        }
+      ]
+    },
+    {
+      "name": "03 - Update operation",
+      "item": [
         {
           "name": "Update operation",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('200 OK with the new configuration', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(body.operationName).to.eql('Charge payment #42 (updated)');",
+                  "    pm.expect(body.maxRetries).to.eql(5);",
+                  "    pm.expect(body.initialDelayMs).to.eql(200);",
+                  "    pm.expect(body.failuresBeforeSuccess).to.eql(1);",
+                  "});",
+                  "pm.test('Status and createdAt are not changed by an update', function () {",
+                  "    pm.expect(body.status).to.eql('PENDING');",
+                  "    pm.expect(body.createdAt).to.eql(pm.collectionVariables.get('createdAt'));",
+                  "});"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "PUT",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
@@ -92,26 +205,499 @@
           }
         },
         {
+          "name": "Get updated operation (persisted)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Update was persisted', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().operationName).to.eql('Charge payment #42 (updated)');",
+                  "    pm.expect(pm.response.json().maxRetries).to.eql(5);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/operations/{{operationId}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "04 - Delete operation",
+      "item": [
+        {
           "name": "Delete operation",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204 No Content with an empty body', function () {",
+                  "    pm.response.to.have.status(204);",
+                  "    pm.expect(pm.response.text()).to.eql('');",
+                  "});"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "DELETE",
             "url": "{{baseUrl}}/api/operations/{{operationId}}"
           }
         },
         {
-          "name": "Create operation - invalid",
+          "name": "Get deleted operation",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Deleted operation is gone (404)', function () {",
+                  "    pm.response.to.have.status(404);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/operations/{{operationId}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "05 - Execute: succeeds immediately",
+      "item": [
+        {
+          "name": "Create (0 failures before success)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.response.to.have.status(201);",
+                  "pm.collectionVariables.set('s5Id', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "url": "{{baseUrl}}/api/operations",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"operationName\": \"\",\n  \"operationType\": \"PAYMENT\",\n  \"maxRetries\": 0,\n  \"initialDelayMs\": 100000,\n  \"failuresBeforeSuccess\": -1\n}"
+              "raw": "{\n  \"operationName\": \"Send welcome email\",\n  \"operationType\": \"EMAIL\",\n  \"maxRetries\": 3,\n  \"initialDelayMs\": 500,\n  \"failuresBeforeSuccess\": 0\n}"
             }
           }
         },
         {
-          "name": "Create operation - invalid enum",
+          "name": "Execute",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('SUCCESS on the first attempt', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(body.status).to.eql('SUCCESS');",
+                  "    pm.expect(body.totalAttempts).to.eql(1);",
+                  "});",
+                  "pm.test('Not a recovery: nothing failed', function () {",
+                  "    pm.expect(body.recovered).to.eql(false);",
+                  "    pm.expect(body.lastError == null).to.be.true;",
+                  "});",
+                  "pm.test('No backoff was waited (duration < initialDelayMs)', function () {",
+                  "    pm.expect(body.durationMs).to.be.below(500);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/operations/{{s5Id}}/execute"
+          }
+        }
+      ]
+    },
+    {
+      "name": "06 - Execute: fails once, then succeeds",
+      "item": [
+        {
+          "name": "Create (1 failure before success)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.response.to.have.status(201);",
+                  "pm.collectionVariables.set('s6Id', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/operations",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"operationName\": \"Push order notification\",\n  \"operationType\": \"NOTIFICATION\",\n  \"maxRetries\": 3,\n  \"initialDelayMs\": 300,\n  \"failuresBeforeSuccess\": 1\n}"
+            }
+          }
+        },
+        {
+          "name": "Execute",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('SUCCESS on attempt 2', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(body.status).to.eql('SUCCESS');",
+                  "    pm.expect(body.totalAttempts).to.eql(2);",
+                  "});",
+                  "pm.test('Marked as recovered; last failure is kept for diagnosis', function () {",
+                  "    pm.expect(body.recovered).to.eql(true);",
+                  "    pm.expect(body.lastError).to.include('attempt 1');",
+                  "});",
+                  "pm.test('Waited one backoff of 300 ms', function () {",
+                  "    pm.expect(body.durationMs).to.be.within(300, 800);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/operations/{{s6Id}}/execute"
+          }
+        }
+      ]
+    },
+    {
+      "name": "07 - Execute: fails multiple times, then succeeds",
+      "item": [
+        {
+          "name": "Create (3 failures before success)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.response.to.have.status(201);",
+                  "pm.collectionVariables.set('s7Id', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/operations",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"operationName\": \"Call shipping API\",\n  \"operationType\": \"HTTP_CALL\",\n  \"maxRetries\": 5,\n  \"initialDelayMs\": 200,\n  \"failuresBeforeSuccess\": 3\n}"
+            }
+          }
+        },
+        {
+          "name": "Execute",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('SUCCESS on attempt 4 of 5', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(body.status).to.eql('SUCCESS');",
+                  "    pm.expect(body.totalAttempts).to.eql(4);",
+                  "    pm.expect(body.maxRetries).to.eql(5);",
+                  "});",
+                  "pm.test('Marked as recovered; last failure was attempt 3', function () {",
+                  "    pm.expect(body.recovered).to.eql(true);",
+                  "    pm.expect(body.lastError).to.include('attempt 3');",
+                  "});",
+                  "pm.test('Exponential backoff waited 200 + 400 + 800 = 1400 ms', function () {",
+                  "    pm.expect(body.durationMs).to.be.within(1400, 1900);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/operations/{{s7Id}}/execute"
+          }
+        },
+        {
+          "name": "Create (backoff that hits the 2000 ms cap)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.response.to.have.status(201);",
+                  "pm.collectionVariables.set('s7CapId', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/operations",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"operationName\": \"Capture payment (slow backoff)\",\n  \"operationType\": \"PAYMENT\",\n  \"maxRetries\": 3,\n  \"initialDelayMs\": 1500,\n  \"failuresBeforeSuccess\": 2\n}"
+            }
+          }
+        },
+        {
+          "name": "Execute (backoff capped)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('SUCCESS on attempt 3, recovered', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(body.status).to.eql('SUCCESS');",
+                  "    pm.expect(body.totalAttempts).to.eql(3);",
+                  "    pm.expect(body.recovered).to.eql(true);",
+                  "});",
+                  "pm.test('Second delay capped: 1500 + 2000 = 3500 ms (uncapped would be 4500)', function () {",
+                  "    pm.expect(body.durationMs).to.be.within(3500, 4000);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/operations/{{s7CapId}}/execute"
+          }
+        }
+      ]
+    },
+    {
+      "name": "08 - Execute: exhausts retries",
+      "item": [
+        {
+          "name": "Create (more failures than attempts)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.response.to.have.status(201);",
+                  "pm.collectionVariables.set('s8Id', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/operations",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"operationName\": \"Refund payment\",\n  \"operationType\": \"PAYMENT\",\n  \"maxRetries\": 3,\n  \"initialDelayMs\": 200,\n  \"failuresBeforeSuccess\": 5\n}"
+            }
+          }
+        },
+        {
+          "name": "Execute",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('FAILED after exactly maxRetries (3) attempts - never more', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(body.status).to.eql('FAILED');",
+                  "    pm.expect(body.totalAttempts).to.eql(3);",
+                  "});",
+                  "pm.test('Not recovered; lastError is the final attempt failure', function () {",
+                  "    pm.expect(body.recovered).to.eql(false);",
+                  "    pm.expect(body.lastError).to.include('attempt 3');",
+                  "});",
+                  "pm.test('Waited 200 + 400 ms and did not sleep after the final attempt', function () {",
+                  "    pm.expect(body.durationMs).to.be.within(600, 1000);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/operations/{{s8Id}}/execute"
+          }
+        },
+        {
+          "name": "Get exhausted operation",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('Final state is persisted as FAILED with timestamps', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(body.status).to.eql('FAILED');",
+                  "    pm.expect(body.totalAttempts).to.eql(3);",
+                  "    pm.expect(body.startedAt).to.be.a('string');",
+                  "    pm.expect(body.completedAt).to.be.a('string');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/operations/{{s8Id}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "09 - Invalid retry configuration",
+      "item": [
+        {
+          "name": "Values below the minimums",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('400 with one error per invalid field', function () {",
+                  "    pm.response.to.have.status(400);",
+                  "    pm.expect(body.message).to.eql('Validation failed');",
+                  "    pm.expect(Object.keys(body.fieldErrors).sort()).to.eql(['failuresBeforeSuccess', 'initialDelayMs', 'maxRetries', 'operationName']);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/operations",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"operationName\": \"\",\n  \"operationType\": \"PAYMENT\",\n  \"maxRetries\": 0,\n  \"initialDelayMs\": 0,\n  \"failuresBeforeSuccess\": -1\n}"
+            }
+          }
+        },
+        {
+          "name": "Values above the maximums",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.variables.set('tooLongName', new Array(102).join('x'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('400 for name > 100 chars, maxRetries > 10, delay > 5000, failures > 20', function () {",
+                  "    pm.response.to.have.status(400);",
+                  "    pm.expect(Object.keys(body.fieldErrors).sort()).to.eql(['failuresBeforeSuccess', 'initialDelayMs', 'maxRetries', 'operationName']);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/operations",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"operationName\": \"{{tooLongName}}\",\n  \"operationType\": \"PAYMENT\",\n  \"maxRetries\": 11,\n  \"initialDelayMs\": 5001,\n  \"failuresBeforeSuccess\": 21\n}"
+            }
+          }
+        },
+        {
+          "name": "Missing required fields",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var body = pm.response.json();",
+                  "pm.test('400 listing every missing field (no silent defaults)', function () {",
+                  "    pm.response.to.have.status(400);",
+                  "    pm.expect(Object.keys(body.fieldErrors).sort()).to.eql(['failuresBeforeSuccess', 'initialDelayMs', 'maxRetries', 'operationName', 'operationType']);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/operations",
+            "body": {
+              "mode": "raw",
+              "raw": "{}"
+            }
+          }
+        },
+        {
+          "name": "Invalid operation type",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 naming the bad value and the allowed values', function () {",
+                  "    pm.response.to.have.status(400);",
+                  "    pm.expect(pm.response.json().message).to.include(\"Invalid value 'FAX' for field 'operationType'\");",
+                  "    pm.expect(pm.response.json().message).to.include('HTTP_CALL, PAYMENT, EMAIL, NOTIFICATION');",
+                  "});"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
@@ -123,17 +709,629 @@
           }
         },
         {
-          "name": "Get operation - not found",
+          "name": "Malformed JSON",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 Malformed JSON request body', function () {",
+                  "    pm.response.to.have.status(400);",
+                  "    pm.expect(pm.response.json().message).to.eql('Malformed JSON request body');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/operations",
+            "body": {
+              "mode": "raw",
+              "raw": "{ \"operationName\": "
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "10 - Non-existing operation",
+      "item": [
+        {
+          "name": "Get missing operation",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 with the id in the message', function () {",
+                  "    pm.response.to.have.status(404);",
+                  "    pm.expect(pm.response.json().message).to.eql('Retry operation not found with id: ' + pm.collectionVariables.get('missingId'));",
+                  "});"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "GET",
-            "url": "{{baseUrl}}/api/operations/9999"
+            "url": "{{baseUrl}}/api/operations/{{missingId}}"
           }
         },
         {
-          "name": "Get operation - invalid id",
+          "name": "Execute missing operation",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 (not 409) when executing a missing operation', function () {",
+                  "    pm.response.to.have.status(404);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/operations/{{missingId}}/execute"
+          }
+        },
+        {
+          "name": "Attempts of missing operation",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 instead of an empty list', function () {",
+                  "    pm.response.to.have.status(404);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/operations/{{missingId}}/attempts"
+          }
+        },
+        {
+          "name": "Update missing operation",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404', function () {",
+                  "    pm.response.to.have.status(404);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/operations/{{missingId}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"operationName\": \"Ghost\",\n  \"operationType\": \"EMAIL\",\n  \"maxRetries\": 3,\n  \"initialDelayMs\": 100,\n  \"failuresBeforeSuccess\": 0\n}"
+            }
+          }
+        },
+        {
+          "name": "Delete missing operation",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404', function () {",
+                  "    pm.response.to.have.status(404);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "url": "{{baseUrl}}/api/operations/{{missingId}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "11 - Attempt history",
+      "item": [
+        {
+          "name": "History of every executed scenario (count, order, statuses, backoff)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var MAX_DELAY_MS = 2000;",
+                  "var TOLERANCE_MS = 150;",
+                  "",
+                  "function toMillis(text) {",
+                  "    var parts = text.split('.');",
+                  "    var fraction = parts.length > 1 ? (parts[1] + '00').substring(0, 3) : '0';",
+                  "    return Date.parse(parts[0]) + parseInt(fraction, 10);",
+                  "}",
+                  "",
+                  "function expectedDelay(initialDelayMs, failedAttempt) {",
+                  "    return Math.min(initialDelayMs * Math.pow(2, failedAttempt - 1), MAX_DELAY_MS);",
+                  "}",
+                  "",
+                  "function verify(label, op, attempts) {",
+                  "    var expectedCount = Math.min(op.failuresBeforeSuccess + 1, op.maxRetries);",
+                  "    var shouldSucceed = op.failuresBeforeSuccess < op.maxRetries;",
+                  "",
+                  "    pm.test(label + ': ' + expectedCount + ' attempt rows, matching totalAttempts', function () {",
+                  "        pm.expect(attempts.length).to.eql(expectedCount);",
+                  "        pm.expect(op.totalAttempts).to.eql(expectedCount);",
+                  "    });",
+                  "    pm.test(label + ': final status and recovery flag', function () {",
+                  "        pm.expect(op.status).to.eql(shouldSucceed ? 'SUCCESS' : 'FAILED');",
+                  "        pm.expect(op.recovered).to.eql(shouldSucceed && expectedCount > 1);",
+                  "    });",
+                  "    pm.test(label + ': attempts numbered 1..n with the right status and error', function () {",
+                  "        attempts.forEach(function (attempt, index) {",
+                  "            var number = index + 1;",
+                  "            var failed = number <= op.failuresBeforeSuccess;",
+                  "            pm.expect(attempt.attemptNumber).to.eql(number);",
+                  "            pm.expect(attempt.status).to.eql(failed ? 'FAILED' : 'SUCCESS');",
+                  "            if (failed) {",
+                  "                pm.expect(attempt.errorMessage).to.include('attempt ' + number);",
+                  "            } else {",
+                  "                pm.expect(attempt.errorMessage == null).to.be.true;",
+                  "            }",
+                  "            pm.expect(attempt.durationMs).to.be.at.least(0);",
+                  "        });",
+                  "    });",
+                  "    pm.test(label + ': gap between attempts follows exponential backoff (capped at 2000 ms)', function () {",
+                  "        for (var i = 1; i < attempts.length; i++) {",
+                  "            var gap = toMillis(attempts[i].startedAt) - toMillis(attempts[i - 1].completedAt);",
+                  "            var expected = expectedDelay(op.initialDelayMs, i);",
+                  "            pm.expect(gap, 'gap before attempt ' + (i + 1)).to.be.within(expected - 5, expected + TOLERANCE_MS);",
+                  "        }",
+                  "    });",
+                  "}",
+                  "",
+                  "pm.test('200 OK', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "var baseUrl = pm.collectionVariables.get('baseUrl');",
+                  "[['05 immediate success', 's5Id'], ['06 fails once', 's6Id'], ['07 fails three times', 's7Id'],",
+                  " ['07 capped backoff', 's7CapId'], ['08 exhausted', 's8Id']].forEach(function (scenario) {",
+                  "    var url = baseUrl + '/api/operations/' + pm.collectionVariables.get(scenario[1]);",
+                  "    pm.sendRequest(url, function (err, opResponse) {",
+                  "        pm.sendRequest(url + '/attempts', function (err2, attemptsResponse) {",
+                  "            verify(scenario[0], opResponse.json(), attemptsResponse.json());",
+                  "        });",
+                  "    });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/operations/{{s7Id}}/attempts"
+          }
+        },
+        {
+          "name": "Create (never executed)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.response.to.have.status(201);",
+                  "pm.collectionVariables.set('s11PendingId', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/operations",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"operationName\": \"Scheduled reminder\",\n  \"operationType\": \"NOTIFICATION\",\n  \"maxRetries\": 2,\n  \"initialDelayMs\": 100,\n  \"failuresBeforeSuccess\": 0\n}"
+            }
+          }
+        },
+        {
+          "name": "History of a never-executed operation",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 with an empty list', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json()).to.eql([]);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/operations/{{s11PendingId}}/attempts"
+          }
+        }
+      ]
+    },
+    {
+      "name": "12 - Statistics",
+      "item": [
+        {
+          "name": "List operations (compute expected statistics)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.response.to.have.status(200);",
+                  "var ops = pm.response.json();",
+                  "",
+                  "function count(list, predicate) { return list.filter(predicate).length; }",
+                  "function withStatus(status) { return function (o) { return o.status === status; }; }",
+                  "function pct(part, whole) { return whole === 0 ? 0 : Math.round(part * 10000 / whole) / 100; }",
+                  "function isSuccess(o) { return o.status === 'SUCCESS'; }",
+                  "function isRecovered(o) { return o.recovered; }",
+                  "",
+                  "var completed = ops.filter(function (o) { return o.status === 'SUCCESS' || o.status === 'FAILED'; });",
+                  "var successful = count(completed, isSuccess);",
+                  "var failed = count(completed, withStatus('FAILED'));",
+                  "var recovered = count(completed, isRecovered);",
+                  "var attempts = completed.map(function (o) { return o.totalAttempts; });",
+                  "var totalAttempts = attempts.reduce(function (a, b) { return a + b; }, 0);",
+                  "",
+                  "var distribution = {};",
+                  "attempts.forEach(function (n) { distribution[n] = (distribution[n] || 0) + 1; });",
+                  "",
+                  "var byType = {};",
+                  "completed.forEach(function (o) {",
+                  "    byType[o.operationType] = byType[o.operationType] || [];",
+                  "    byType[o.operationType].push(o);",
+                  "});",
+                  "Object.keys(byType).forEach(function (type) {",
+                  "    var list = byType[type];",
+                  "    var ok = count(list, isSuccess);",
+                  "    byType[type] = { completed: list.length, successful: ok, failed: list.length - ok,",
+                  "                     recovered: count(list, isRecovered), successRate: pct(ok, list.length) };",
+                  "});",
+                  "",
+                  "pm.collectionVariables.set('expectedStats', JSON.stringify({",
+                  "    totalOperations: ops.length,",
+                  "    operationsByStatus: { PENDING: count(ops, withStatus('PENDING')), RUNNING: count(ops, withStatus('RUNNING')),",
+                  "                          SUCCESS: successful, FAILED: failed },",
+                  "    completedOperations: completed.length,",
+                  "    successfulOperations: successful,",
+                  "    failedOperations: failed,",
+                  "    firstAttemptSuccesses: count(completed, function (o) { return isSuccess(o) && o.totalAttempts === 1; }),",
+                  "    recoveredOperations: recovered,",
+                  "    successRate: pct(successful, completed.length),",
+                  "    recoveryRate: pct(recovered, recovered + failed),",
+                  "    totalAttempts: totalAttempts,",
+                  "    averageAttempts: completed.length === 0 ? 0 : Math.round(totalAttempts * 100 / completed.length) / 100,",
+                  "    maxAttempts: attempts.length === 0 ? 0 : Math.max.apply(null, attempts),",
+                  "    attemptsDistribution: distribution,",
+                  "    byOperationType: byType",
+                  "}));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/operations"
+          }
+        },
+        {
+          "name": "Get statistics",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var stats = pm.response.json();",
+                  "var expected = JSON.parse(pm.collectionVariables.get('expectedStats'));",
+                  "",
+                  "pm.test('200 OK', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "Object.keys(expected).forEach(function (key) {",
+                  "    pm.test(key + ' matches a recount of the operation list', function () {",
+                  "        pm.expect(stats[key]).to.eql(expected[key]);",
+                  "    });",
+                  "});",
+                  "pm.test('Counts are internally consistent', function () {",
+                  "    pm.expect(stats.completedOperations).to.eql(stats.successfulOperations + stats.failedOperations);",
+                  "    pm.expect(stats.successfulOperations).to.eql(stats.firstAttemptSuccesses + stats.recoveredOperations);",
+                  "});",
+                  "pm.test('This run is reflected: there are recoveries and exhausted failures', function () {",
+                  "    pm.expect(stats.recoveredOperations).to.be.at.least(3);",
+                  "    pm.expect(stats.failedOperations).to.be.at.least(1);",
+                  "    pm.expect(stats.operationsByStatus.PENDING).to.be.at.least(1);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/operations/statistics"
+          }
+        }
+      ]
+    },
+    {
+      "name": "13 - Error responses",
+      "item": [
+        {
+          "name": "Non-numeric id",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 naming the bad parameter', function () {",
+                  "    pm.response.to.have.status(400);",
+                  "    pm.expect(pm.response.json().message).to.eql(\"Invalid value 'abc' for parameter 'id'\");",
+                  "});"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "GET",
             "url": "{{baseUrl}}/api/operations/abc"
+          }
+        },
+        {
+          "name": "Unknown endpoint",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 in the standard error format', function () {",
+                  "    pm.response.to.have.status(404);",
+                  "    pm.expect(pm.response.json().path).to.eql('/api/does-not-exist');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/does-not-exist"
+          }
+        },
+        {
+          "name": "Method not allowed",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('405 for an unsupported HTTP method', function () {",
+                  "    pm.response.to.have.status(405);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "url": "{{baseUrl}}/api/operations/{{s5Id}}"
+          }
+        },
+        {
+          "name": "Unsupported media type",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('415 when the body is not JSON', function () {",
+                  "    pm.response.to.have.status(415);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "text/plain" }],
+            "url": "{{baseUrl}}/api/operations",
+            "body": {
+              "mode": "raw",
+              "raw": "not json"
+            }
+          }
+        },
+        {
+          "name": "Execute an already completed operation",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 explaining the current status', function () {",
+                  "    pm.response.to.have.status(409);",
+                  "    pm.expect(pm.response.json().message).to.eql('Retry operation ' + pm.collectionVariables.get('s5Id') + ' cannot be executed because its status is SUCCESS');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/operations/{{s5Id}}/execute"
+          }
+        },
+        {
+          "name": "Update an already completed operation",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409: configuration is frozen once executed', function () {",
+                  "    pm.response.to.have.status(409);",
+                  "    pm.expect(pm.response.json().message).to.include('because its status is FAILED');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/operations/{{s8Id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"operationName\": \"Refund payment (retry config change)\",\n  \"operationType\": \"PAYMENT\",\n  \"maxRetries\": 10,\n  \"initialDelayMs\": 100,\n  \"failuresBeforeSuccess\": 5\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "14 - Repeated and concurrent execution",
+      "item": [
+        {
+          "name": "Create (target for concurrent executes)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.response.to.have.status(201);",
+                  "pm.collectionVariables.set('s14Id', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/operations",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"operationName\": \"Charge payment (double-click)\",\n  \"operationType\": \"PAYMENT\",\n  \"maxRetries\": 3,\n  \"initialDelayMs\": 300,\n  \"failuresBeforeSuccess\": 2\n}"
+            }
+          }
+        },
+        {
+          "name": "Fire 5 executes at the same time, then read the operation",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var url = pm.collectionVariables.get('baseUrl') + '/api/operations/' + pm.collectionVariables.get('s14Id') + '/execute';",
+                  "var statuses = [];",
+                  "for (var i = 0; i < 5; i++) {",
+                  "    pm.sendRequest({ url: url, method: 'POST' }, function (err, response) {",
+                  "        statuses.push(err ? 'error' : response.code);",
+                  "        pm.collectionVariables.set('concurrentStatuses', JSON.stringify(statuses));",
+                  "    });",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var statuses = JSON.parse(pm.collectionVariables.get('concurrentStatuses'));",
+                  "var body = pm.response.json();",
+                  "pm.test('Exactly one execute ran (200); the other four were rejected (409)', function () {",
+                  "    pm.expect(statuses.slice().sort()).to.eql([200, 409, 409, 409, 409]);",
+                  "});",
+                  "pm.test('The operation ran its retry loop exactly once', function () {",
+                  "    pm.expect(body.status).to.eql('SUCCESS');",
+                  "    pm.expect(body.totalAttempts).to.eql(3);",
+                  "    pm.expect(body.recovered).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/operations/{{s14Id}}"
+          }
+        },
+        {
+          "name": "Attempt history has no duplicates",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Exactly attempts 1, 2, 3 - one set, no duplicates', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().map(function (a) { return a.attemptNumber; })).to.eql([1, 2, 3]);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/operations/{{s14Id}}/attempts"
+          }
+        },
+        {
+          "name": "Repeat execute after completion",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409: a finished operation is never executed twice', function () {",
+                  "    pm.response.to.have.status(409);",
+                  "    pm.expect(pm.response.json().message).to.include('because its status is SUCCESS');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/operations/{{s14Id}}/execute"
           }
         }
       ]

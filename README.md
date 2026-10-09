@@ -1,335 +1,304 @@
 # RetryGuard — Smart API Retry & Failure Tracker
 
-RetryGuard is a Spring Boot backend service that tracks backend operations and handles
-**temporary (transient) failures** using a configurable number of attempts and
-**exponential backoff**. Every attempt is recorded, so you can see what failed, why,
-how long it took, and whether the operation eventually recovered.
+RetryGuard is a Spring Boot REST service that runs backend operations through a
+hand-written retry engine. Temporary (transient) failures are retried a configurable
+number of times with **capped exponential backoff**; every attempt is stored in
+PostgreSQL, so you can see what failed, why, how long the waits were, and whether the
+operation eventually recovered. Statistics are computed with Java Streams.
 
-> Status: **Stage 11 — service design cleaned up; transaction boundaries reviewed (atomic outcome recording, startup recovery of interrupted executions).** Runs on `http://localhost:8082`
-> (`.\mvnw.cmd spring-boot:run`). Copy `.env.example` to `.env` and set your local
-> PostgreSQL credentials first. Import `postman/RetryGuard.postman_collection.json` into Postman.
+Java 21 · Spring Boot 3.5 · Spring MVC · Spring Data JPA / Hibernate · PostgreSQL · Postman
+
+> **Note on scope:** RetryGuard does not call real external APIs. Failures are
+> **simulated deterministically** (`failuresBeforeSuccess`), so every run is repeatable
+> and the retry behaviour can be demonstrated and tested exactly.
 
 ---
 
-## 1. Problem Statement
+## Contents
 
-Backend services constantly call things they do not control: payment gateways, email
-providers, other internal services, databases. Those calls sometimes fail for reasons
-that fix themselves a moment later:
+1. [Problem statement](#1-problem-statement)
+2. [Features](#2-features)
+3. [Architecture](#3-architecture)
+4. [Retry algorithm](#4-retry-algorithm)
+5. [Exponential backoff](#5-exponential-backoff)
+6. [Database model](#6-database-model)
+7. [REST API](#7-rest-api)
+8. [Example requests and responses](#8-example-requests-and-responses)
+9. [PostgreSQL setup](#9-postgresql-setup)
+10. [How to run](#10-how-to-run)
+11. [How to test with Postman](#11-how-to-test-with-postman)
+12. [Exception handling](#12-exception-handling)
+13. [Transactions](#13-transactions)
+14. [Concurrency decisions](#14-concurrency-decisions)
+15. [Streams and lambdas](#15-streams-and-lambdas)
+16. [Concepts demonstrated](#16-concepts-demonstrated)
+17. [Limitations](#17-limitations)
+18. [Development history](#18-development-history)
 
-- a network timeout or dropped connection
-- `503 Service Unavailable` while the other service restarts
+---
+
+## 1. Problem statement
+
+Backend services constantly depend on things they do not control: payment gateways,
+email providers, other services, databases. Some failures fix themselves moments later:
+
+- a timeout or dropped connection
+- `503 Service Unavailable` while a dependency restarts
 - `429 Too Many Requests` (rate limiting)
-- a database connection pool that is briefly exhausted
+- a briefly exhausted connection pool
 
-If the service gives up on the first failure, users see errors that did not need to
-happen. If the service retries immediately and endlessly, it can overload the
-struggling dependency and make the outage worse.
+Giving up on the first failure shows users errors that did not need to happen.
+Retrying immediately and forever overloads the struggling dependency (a *retry storm*)
+and can block the caller indefinitely.
 
-RetryGuard demonstrates the middle ground: **retry a limited number of times, wait
-longer between each attempt, record everything, and fail cleanly when retries are
-exhausted.**
+RetryGuard implements the middle ground: **retry a bounded number of times, wait longer
+between each attempt, record everything, and fail cleanly when retries are exhausted.**
 
-### Transient vs permanent failures
-
-| Transient (worth retrying) | Permanent (do not retry) |
-|----------------------------|--------------------------|
-| Timeout, connection reset  | `400 Bad Request`        |
-| `503`, `429`               | `401` / `403`            |
-| Temporary lock / pool full | `404 Not Found`          |
-
-Retrying a permanent failure only wastes time — the result will never change.
+| Transient — worth retrying   | Permanent — retrying cannot help |
+|------------------------------|----------------------------------|
+| Timeout, connection reset    | `400 Bad Request`                |
+| `503`, `429`                 | `401` / `403`                    |
+| Temporary lock, pool full    | `404 Not Found`                  |
 
 ---
 
-## 2. Features (planned)
+## 2. Features
 
-- Create, read, update, and delete retry operations
-- Configure maximum attempts and initial retry delay per operation
-- Execute an operation through a plain-Java retry engine
-- Exponential backoff between attempts, with a safety cap on delay
-- Deterministic failure simulation (`failuresBeforeSuccess`) for repeatable demos
-- Per-attempt history (attempt number, status, error, timestamps)
-- Statistics: success rate, recovery count, average/maximum attempts
-- Consistent JSON error responses via global exception handling
-- Protection against two concurrent executions of the same operation
-
-No external APIs are called. Failures are **simulated deterministically** so every
-Postman demo produces the same result.
-
----
-
-## 3. Technology Stack
-
-| Area        | Choice                                   |
-|-------------|------------------------------------------|
-| Language    | Java 21, SQL                             |
-| Framework   | Spring Boot 3.x (Spring MVC, Spring Data JPA, Bean Validation) |
-| ORM         | Hibernate (via Spring Data JPA)          |
-| Database    | PostgreSQL                               |
-| Build       | Maven (via Maven Wrapper `mvnw`)         |
-| Tools       | Git, Postman                             |
-
-Intentionally **not** used: Resilience4j, Spring Retry, Spring Cloud, Kafka, RabbitMQ,
-Redis, Docker, Spring Security, Lombok. The retry logic is written by hand so that it
-can be fully explained.
+- CRUD for retry operations, with Bean Validation on every input
+- Per-operation retry configuration: total attempts (1–10) and initial delay (1–5000 ms)
+- Plain-Java retry engine: bounded loop, only transient failures retried
+- Exponential backoff, capped by a configurable `retryguard.retry.max-delay-ms` (default 2000)
+- Deterministic failure simulation for repeatable demos and tests
+- Per-attempt history: number, status, error, start/end timestamps, duration
+- Final outcome per operation: status, attempt count, last error, `recovered` flag
+- Statistics: success rate, recovery rate, average/max attempts, distribution, per-type breakdown
+- Consistent JSON error responses (400/404/405/409/415/500), never stack traces
+- Safe under concurrent requests: an operation's retry loop runs at most once
+- Atomic outcome recording and startup recovery of executions cut off by a crash
+- Postman collection: 14 scenarios, 181 automated assertions
 
 ---
 
-## 4. Architecture
+## 3. Architecture
 
-Classic layered architecture. Each layer only talks to the layer directly below it.
+Layered architecture. Each layer depends only on the layer below it.
 
 ```
-            Postman (HTTP client)
-                    │  JSON over HTTP
-                    ▼
-┌──────────────────────────────────────────┐
-│ Controller layer  (@RestController)      │  HTTP mapping, validation trigger,
-│                                          │  DTO in / DTO out. No business logic.
-└──────────────────────────────────────────┘
-                    │
-                    ▼
-┌──────────────────────────────────────────┐
-│ Service layer     (@Service)             │  Business rules, retry engine,
-│                                          │  backoff, state transitions,
-│                                          │  statistics, transactions.
-└──────────────────────────────────────────┘
-                    │
-                    ▼
-┌──────────────────────────────────────────┐
-│ Repository layer  (JpaRepository)        │  Database access only.
-└──────────────────────────────────────────┘
-                    │  SQL (Hibernate)
-                    ▼
-               PostgreSQL
-```
+                Postman (HTTP client)
+                        │  JSON over HTTP
+                        ▼
+┌───────────────────────────────────────────────────────┐
+│ controller   RetryOperationController, PingController │  HTTP mapping, @Valid,
+│                                                       │  DTO in / DTO out
+├───────────────────────────────────────────────────────┤
+│ service      RetryOperationService      CRUD + state rules
+│              RetryExecutionService      claim → retry → record outcome
+│              RetryEngine                bounded retry loop + backoff (no DB)
+│              OperationSimulator         deterministic transient failures
+│              RetryStatisticsService     Streams aggregation
+│              InterruptedExecutionRecovery  startup cleanup
+├───────────────────────────────────────────────────────┤
+│ repository   RetryOperationRepository, RetryAttemptRepository (Spring Data JPA)
+└───────────────────────────────────────────────────────┘
+                        │  SQL generated by Hibernate
+                        ▼
+                    PostgreSQL
 
-Cross-cutting: `exception` (custom exceptions + `@RestControllerAdvice`),
-`config` (retry settings), `util` (small helpers such as backoff calculation).
+cross-cutting:  exception (custom exceptions, @RestControllerAdvice, ApiErrorResponse)
+                config    (RetryProperties, Clock bean)    util (BackoffCalculator, TextUtils)
+```
 
 ### Package structure
 
 ```
 com.retryguard
-├── controller   REST endpoints
-├── service      business logic, retry engine, statistics
-├── repository   Spring Data JPA interfaces
-├── entity       JPA entities and enums
-├── dto          request / response objects
-├── exception    custom exceptions, global handler, error response
-├── config       configuration properties
-└── util         small stateless helpers
+├── controller   REST endpoints (thin: no business logic)
+├── service      business rules, retry engine, simulator, statistics
+├── repository   Spring Data JPA interfaces, custom JPQL
+├── entity       RetryOperation, RetryAttempt, enums
+├── dto          request/response records
+├── exception    custom exceptions, GlobalExceptionHandler, ApiErrorResponse
+├── config       RetryProperties (@ConfigurationProperties), TimeConfig (Clock)
+└── util         BackoffCalculator, TextUtils
 ```
 
-### Design rules
+### Design rules followed
 
-- Constructor injection only (no field injection, no Lombok)
-- Thin controllers; business logic in services; persistence in repositories
-- Entities never returned directly from controllers — DTOs only
-- No infinite retries; no swallowed exceptions; no stack traces in API responses
+- Constructor injection only; no field injection, no Lombok
+- Entities are never returned from controllers — DTOs only
+- Retry logic lives in exactly one place (`RetryEngine`)
+- No infinite retries, no swallowed exceptions, no stack traces in responses
+- No retry/resilience libraries — the algorithm is written by hand so it can be explained
 
 ---
 
-## 5. Domain Model
+## 4. Retry algorithm
 
-### `RetryOperation`
-
-One unit of work that may need retrying.
-
-| Field                   | Type            | Meaning |
-|-------------------------|-----------------|---------|
-| `id`                    | `Long`          | Primary key |
-| `operationName`         | `String`        | Human-readable name, e.g. `"Charge payment #42"` |
-| `operationType`         | enum            | Category, e.g. `PAYMENT`, `EMAIL`, `HTTP_CALL` (used for grouping statistics) |
-| `maxRetries`            | `int`           | **Maximum total attempts, including the first** (1–10) |
-| `initialDelayMs`        | `long`          | Delay before the 2nd attempt; doubles afterwards |
-| `failuresBeforeSuccess` | `int`           | Simulation control: how many attempts fail before one succeeds |
-| `status`                | enum            | `PENDING`, `RUNNING`, `SUCCESS`, `FAILED` |
-| `totalAttempts`         | `int`           | Attempts actually made |
-| `lastError`             | `String`        | Message from the most recent failed attempt |
-| `recovered`             | `boolean`       | `true` if it succeeded **after** at least one failure |
-| `startedAt`             | `LocalDateTime` | When execution began |
-| `completedAt`           | `LocalDateTime` | When execution finished |
-| `createdAt`             | `LocalDateTime` | When the record was created |
-
-> **Naming note:** `maxRetries` is interpreted as *total attempts allowed*, so
-> `maxRetries = 3` means at most 3 attempts. This matches the examples below and is
-> documented explicitly to avoid the common "is the first call a retry?" ambiguity.
-
-### `RetryAttempt` (planned for Stage 7)
-
-| Field            | Type            |
-|------------------|-----------------|
-| `id`             | `Long`          |
-| `retryOperation` | `RetryOperation` (many-to-one) |
-| `attemptNumber`  | `int`           |
-| `status`         | enum: `SUCCESS`, `FAILED` |
-| `errorMessage`   | `String`        |
-| `startedAt`      | `LocalDateTime` |
-| `completedAt`    | `LocalDateTime` |
-
-**Why a separate entity is worth it:** `RetryOperation` only stores the *final*
-outcome. Without attempt history you cannot show *which* attempt failed, *what* the
-error was each time, or *how long* the backoff waits really were. It is the
-natural place to demonstrate `@OneToMany` / `@ManyToOne`, foreign keys, `mappedBy`,
-lazy loading, and cascade decisions — and it stays small (one extra table, one
-extra endpoint). Storing attempts as a JSON blob or a comma-separated string would
-be harder to query and would teach less.
-
-### Status lifecycle
+`maxRetries` means **total attempts, including the first** — `maxRetries = 3` allows at
+most 3 attempts. This avoids the classic "is the first call a retry?" ambiguity.
 
 ```
- PENDING ──execute──► RUNNING ──attempt succeeds──────────► SUCCESS
-                         │
-                         └──all attempts fail────────────► FAILED
-```
-
-- Only `PENDING` operations can be executed (`SUCCESS` and `FAILED` are final).
-- Executing an operation that is already `RUNNING` is rejected (`409 Conflict`).
-- Updates (`PUT`) are only allowed while the operation is `PENDING`.
-
----
-
-## 6. Database Design
-
-```
-retry_operations                         retry_attempts
-────────────────────────────            ─────────────────────────────
-id                  BIGSERIAL PK  ◄──┐  id                BIGSERIAL PK
-operation_name      VARCHAR(100)     └──operation_id      BIGINT FK NOT NULL
-operation_type      VARCHAR(30)         attempt_number    INT
-max_retries         INT                 status            VARCHAR(20)
-initial_delay_ms    BIGINT              error_message     VARCHAR(500)
-failures_before_success INT             started_at        TIMESTAMP
-status              VARCHAR(20)         completed_at      TIMESTAMP
-total_attempts      INT
-last_error          VARCHAR(500)        UNIQUE (operation_id, attempt_number)
-recovered           BOOLEAN
-started_at          TIMESTAMP
-completed_at        TIMESTAMP
-created_at          TIMESTAMP
-```
-
-- Enums are stored as **strings** (`@Enumerated(EnumType.STRING)`), not ordinals, so
-  reordering enum constants can never silently corrupt existing rows.
-- Relationship: `retry_operations 1 ──── * retry_attempts`.
-
----
-
-## 7. Retry Algorithm
-
-### Exponential backoff
-
-After a failed attempt, wait before trying again. The wait doubles each time:
-
-```
-delay(n) = initialDelayMs × 2^(n − 1)      n = number of the attempt that just failed
-delay    = min(delay, maxDelayMs)          safety cap (configurable)
-```
-
-With `initialDelayMs = 100`:
-
-| Attempt | Result  | Wait before next attempt |
-|---------|---------|--------------------------|
-| 1       | FAILED  | 100 ms                   |
-| 2       | FAILED  | 200 ms                   |
-| 3       | FAILED  | 400 ms                   |
-| 4       | ...     | 800 ms                   |
-
-There is **no wait after the final attempt** — once retries are exhausted the
-operation is marked `FAILED` immediately.
-
-### Why not retry immediately?
-
-If 1,000 clients all retry instantly against a struggling service, it receives a
-burst of traffic exactly when it is least able to handle it (a "retry storm").
-Backoff spreads retries out and gives the dependency time to recover.
-
-### Why must retries be limited?
-
-Some failures never heal. Without a limit, a request thread would be stuck forever,
-resources leak, and the caller never receives an answer. A bounded retry count
-guarantees the operation always ends in a final state (`SUCCESS` or `FAILED`).
-
-### Pseudocode
-
-```
-mark operation RUNNING, set startedAt
-for attempt = 1 .. maxRetries:
-    record attempt start
-    if simulatedCall(attempt) succeeds:
+for attempt = 1 .. maxAttempts:
+    try:
+        action(attempt)
         record attempt SUCCESS
-        mark operation SUCCESS, recovered = (attempt > 1)
-        stop
-    else:
-        record attempt FAILED with error message
-        if attempt < maxRetries:
-            sleep(min(initialDelayMs × 2^(attempt − 1), maxDelayMs))
-mark operation FAILED if no attempt succeeded
-set totalAttempts, lastError, completedAt
+        return SUCCESS                      (recovered = attempt > 1)
+    catch TransientOperationException:
+        record attempt FAILED, remember message as lastError
+    catch any other RuntimeException:
+        record attempt FAILED
+        return FAILED                       (permanent: never retried)
+    if attempt < maxAttempts:
+        sleep(backoff(attempt))             (no sleep after the final attempt)
+return FAILED                               (retries exhausted)
 ```
+
+The real implementation is `RetryEngine.run(int maxAttempts, long initialDelayMs, IntConsumer action)`.
+It knows nothing about HTTP or the database: it takes the action as a lambda and returns an
+immutable `RetryOutcome` (succeeded, lastError, list of `AttemptRecord`).
+
+**Why bounded:** some failures never heal. A limit guarantees every operation ends in a
+final state (`SUCCESS` or `FAILED`) and the caller always gets an answer.
+
+**Why only transient failures are retried:** retrying a permanent error (bad input,
+missing resource) wastes time and load — the result can never change.
 
 ### Deterministic simulation
 
-`simulatedCall(attempt)` fails while `attempt <= failuresBeforeSuccess`.
+`OperationSimulator` throws `TransientOperationException("Simulated transient failure on
+attempt N (503 Service Unavailable)")` while `attempt <= failuresBeforeSuccess`.
 
 | failuresBeforeSuccess | maxRetries | Attempts                       | Final   | recovered |
 |-----------------------|------------|--------------------------------|---------|-----------|
 | 0                     | 3          | SUCCESS                        | SUCCESS | false     |
+| 1                     | 3          | FAILED, SUCCESS                | SUCCESS | true      |
 | 2                     | 3          | FAILED, FAILED, SUCCESS        | SUCCESS | true      |
 | 5                     | 3          | FAILED, FAILED, FAILED         | FAILED  | false     |
 
----
+When an operation recovers, `lastError` keeps the last failure message for diagnosis.
 
-## 8. Application Flow (execute an operation)
+### Status lifecycle
 
 ```
-POST /api/operations/{id}/execute
-  │
-  ▼
-Controller ── calls ──► RetryExecutionService.execute(id)
-                           │
-                           ├─ load operation (404 if missing)
-                           ├─ check status is PENDING (409 otherwise)
-                           ├─ atomically switch PENDING → RUNNING
-                           ├─ loop attempts:
-                           │     simulate call → record RetryAttempt
-                           │     on failure: compute backoff, Thread.sleep
-                           ├─ set final status, totalAttempts, recovered, lastError
-                           └─ save and return ExecutionResultResponse
-  │
-  ▼
-200 OK  { operationId, status, totalAttempts, recovered, lastError, durationMs }
+PENDING ──execute (atomic claim)──► RUNNING ──an attempt succeeds──► SUCCESS
+                                       │
+                                       ├──all attempts fail────────► FAILED
+                                       └──app crashed mid-run──────► FAILED (on next startup)
 ```
 
-The retry loop sleeps, so it should **not** hold one database transaction open for
-the whole execution. Short transactions are used for the state changes instead
-(discussed in Stages 8 and 11).
+| Action  | Allowed when            | Otherwise |
+|---------|-------------------------|-----------|
+| Execute | `PENDING`               | `409`     |
+| Update  | `PENDING`               | `409`     |
+| Delete  | anything but `RUNNING`  | `409`     |
 
 ---
 
-## 9. Planned REST API
+## 5. Exponential backoff
 
-| Method | Endpoint                          | Purpose                          | Success |
-|--------|-----------------------------------|----------------------------------|---------|
-| GET    | `/api/ping`                       | Health check                     | 200 |
-| POST   | `/api/operations`                 | Create operation                 | 201 |
-| GET    | `/api/operations`                 | List operations                  | 200 |
-| GET    | `/api/operations/{id}`            | Get one operation                | 200 |
-| PUT    | `/api/operations/{id}`            | Update a `PENDING` operation     | 200 |
-| DELETE | `/api/operations/{id}`            | Delete operation                 | 204 |
-| POST   | `/api/operations/{id}/execute`    | Run the retry engine             | 200 |
-| GET    | `/api/operations/{id}/attempts`   | Attempt history                  | 200 |
-| GET    | `/api/operations/statistics`      | Aggregated retry statistics      | 200 |
+After a failed attempt the engine waits before the next one, doubling each time:
 
-Error codes: `400` validation error, `404` operation not found,
-`409` operation already running / not executable.
+```
+delay(n) = min(initialDelayMs × 2^(n − 1), maxDelayMs)     n = number of the attempt that just failed
+```
 
-### Example create request
+With `initialDelayMs = 200`, `maxDelayMs = 2000`:
+
+| Failed attempt | Wait before next attempt |
+|----------------|--------------------------|
+| 1              | 200 ms                   |
+| 2              | 400 ms                   |
+| 3              | 800 ms                   |
+| 4              | 1600 ms                  |
+| 5              | 2000 ms (capped; 3200 uncapped) |
+
+- **Why wait at all:** if many clients retry instantly, the failing dependency gets a burst
+  of traffic exactly when it is weakest. Growing delays spread the load and give it time to recover.
+- **Why the cap:** without it, delays grow without limit (attempt 10 at 200 ms would wait 102 s).
+  The cap is validated at startup (`@Min(1) @Max(60000)`) — a bad value stops the app instead
+  of misbehaving later.
+- **Overflow safety:** `BackoffCalculator` caps the shift and checks
+  `initialDelayMs > maxDelayMs / multiplier` *before* multiplying, so the `long` math can never overflow.
+- **No sleep after the last attempt:** once retries are exhausted the result is returned immediately.
+
+Measured in Stage 12 from stored attempt timestamps: gaps of 204 / 406 / 808 ms for an
+expected 200 / 400 / 800, and 1505 / 2007 ms for 1500 / 2000 (capped).
+
+---
+
+## 6. Database model
+
+Tables are generated by Hibernate from the entities (`spring.jpa.hibernate.ddl-auto=update`).
+
+```
+retry_operations                                retry_attempts
+──────────────────────────────────              ──────────────────────────────────
+id                       bigint PK (identity) ◄─┐ id              bigint PK (identity)
+operation_name           varchar(100)  NOT NULL └─ operation_id    bigint FK NOT NULL
+operation_type           varchar(30)   NOT NULL    attempt_number  int        NOT NULL
+max_retries              int           NOT NULL    status          varchar(20) NOT NULL
+initial_delay_ms         bigint        NOT NULL    error_message   varchar(500)
+failures_before_success  int           NOT NULL    started_at      timestamp  NOT NULL
+status                   varchar(20)   NOT NULL    completed_at    timestamp  NOT NULL
+total_attempts           int           NOT NULL
+last_error               varchar(500)              UNIQUE (operation_id, attempt_number)
+recovered                boolean       NOT NULL
+started_at               timestamp
+completed_at             timestamp
+created_at               timestamp     NOT NULL
+version                  bigint        NOT NULL DEFAULT 0
+```
+
+- **One-to-many:** one operation has many attempts. `RetryAttempt.retryOperation` is the
+  owning side (`@ManyToOne(fetch = LAZY)` + `@JoinColumn`); `RetryOperation.attempts` is the
+  inverse side (`mappedBy`) with `cascade = REMOVE`, so deleting an operation deletes its history.
+- **Enums stored as strings** (`EnumType.STRING`) — reordering enum constants can never
+  corrupt existing rows. Hibernate also adds check constraints for the allowed values.
+- **Unique `(operation_id, attempt_number)`** — the database itself rejects duplicate history.
+- **`version`** — `@Version` optimistic locking (see [Concurrency](#14-concurrency-decisions)).
+- **Why a separate attempts table** instead of a JSON/text column: it can be queried, ordered,
+  constrained, and counted, and it is the natural place for the JPA relationship.
+
+---
+
+## 7. REST API
+
+Base URL: `http://localhost:8082`
+
+| Method | Endpoint                         | Purpose                      | Success | Errors        |
+|--------|----------------------------------|------------------------------|---------|---------------|
+| GET    | `/api/ping`                      | Health check                 | 200     |               |
+| POST   | `/api/operations`                | Create an operation          | 201 + `Location` | 400  |
+| GET    | `/api/operations`                | List all (sorted by id)      | 200     |               |
+| GET    | `/api/operations/{id}`           | Get one                      | 200     | 400, 404      |
+| PUT    | `/api/operations/{id}`           | Update a `PENDING` operation | 200     | 400, 404, 409 |
+| DELETE | `/api/operations/{id}`           | Delete (not while `RUNNING`) | 204     | 404, 409      |
+| POST   | `/api/operations/{id}/execute`   | Run the retry engine         | 200     | 404, 409      |
+| GET    | `/api/operations/{id}/attempts`  | Attempt history              | 200     | 404           |
+| GET    | `/api/operations/statistics`     | Aggregated statistics        | 200     |               |
+
+### Request body (create / update)
+
+| Field                   | Rule        | Meaning |
+|-------------------------|-------------|---------|
+| `operationName`         | required, ≤ 100 chars | Human-readable name |
+| `operationType`         | required: `HTTP_CALL`, `PAYMENT`, `EMAIL`, `NOTIFICATION` | Category for statistics |
+| `maxRetries`            | required, 1–10 | Total attempts allowed, including the first |
+| `initialDelayMs`        | required, 1–5000 | Wait after the first failure; doubles afterwards |
+| `failuresBeforeSuccess` | required, 0–20 | Simulation: how many attempts fail before one succeeds |
+
+Numeric fields are wrapper types, so a missing field is a `400`, never a silent `0`.
+
+---
+
+## 8. Example requests and responses
+
+Responses below were captured from the running application (except the `404` example,
+which shows the same format with an illustrative id).
+
+### Create — `POST /api/operations`
 
 ```json
-POST /api/operations
 {
   "operationName": "Charge payment #42",
   "operationType": "PAYMENT",
@@ -339,57 +308,463 @@ POST /api/operations
 }
 ```
 
-### Example error response
+`201 Created`, `Location: http://localhost:8082/api/operations/102`
 
 ```json
 {
-  "timestamp": "2026-10-07T17:30:00",
+  "id": 102,
+  "operationName": "Charge payment #42",
+  "operationType": "PAYMENT",
+  "maxRetries": 3,
+  "initialDelayMs": 100,
+  "failuresBeforeSuccess": 2,
+  "status": "PENDING",
+  "totalAttempts": 0,
+  "lastError": null,
+  "recovered": false,
+  "startedAt": null,
+  "completedAt": null,
+  "createdAt": "2026-10-09T12:16:55.61798"
+}
+```
+
+### Execute — `POST /api/operations/102/execute`
+
+`200 OK` — failed twice, succeeded on attempt 3 after waits of 100 + 200 ms:
+
+```json
+{
+  "operationId": 102,
+  "operationName": "Charge payment #42",
+  "status": "SUCCESS",
+  "totalAttempts": 3,
+  "maxRetries": 3,
+  "recovered": true,
+  "lastError": "Simulated transient failure on attempt 2 (503 Service Unavailable)",
+  "startedAt": "2026-10-09T12:16:55.815691",
+  "completedAt": "2026-10-09T12:16:56.171991",
+  "durationMs": 356
+}
+```
+
+### Attempt history — `GET /api/operations/102/attempts`
+
+```json
+[
+  {
+    "attemptNumber": 1,
+    "status": "FAILED",
+    "errorMessage": "Simulated transient failure on attempt 1 (503 Service Unavailable)",
+    "startedAt": "2026-10-09T12:16:55.85234",
+    "completedAt": "2026-10-09T12:16:55.853341",
+    "durationMs": 1
+  },
+  {
+    "attemptNumber": 2,
+    "status": "FAILED",
+    "errorMessage": "Simulated transient failure on attempt 2 (503 Service Unavailable)",
+    "startedAt": "2026-10-09T12:16:55.961192",
+    "completedAt": "2026-10-09T12:16:55.961192",
+    "durationMs": 0
+  },
+  {
+    "attemptNumber": 3,
+    "status": "SUCCESS",
+    "errorMessage": null,
+    "startedAt": "2026-10-09T12:16:56.163976",
+    "completedAt": "2026-10-09T12:16:56.163976",
+    "durationMs": 0
+  }
+]
+```
+
+The gaps between attempts (≈108 ms, then ≈203 ms) are the backoff waits.
+
+### Statistics — `GET /api/operations/statistics`
+
+```json
+{
+  "totalOperations": 56,
+  "operationsByStatus": { "PENDING": 6, "RUNNING": 0, "SUCCESS": 43, "FAILED": 7 },
+  "completedOperations": 50,
+  "successfulOperations": 43,
+  "failedOperations": 7,
+  "firstAttemptSuccesses": 8,
+  "recoveredOperations": 35,
+  "successRate": 86.00,
+  "recoveryRate": 83.33,
+  "totalAttempts": 134,
+  "averageAttempts": 2.68,
+  "maxAttempts": 4,
+  "attemptsDistribution": { "1": 8, "2": 6, "3": 30, "4": 6 },
+  "byOperationType": {
+    "HTTP_CALL":    { "completed": 15, "successful": 15, "failed": 0, "recovered": 14, "successRate": 100.00 },
+    "PAYMENT":      { "completed": 23, "successful": 17, "failed": 6, "recovered": 16, "successRate": 73.91 },
+    "EMAIL":        { "completed": 7,  "successful": 6,  "failed": 1, "recovered": 0,  "successRate": 85.71 },
+    "NOTIFICATION": { "completed": 5,  "successful": 5,  "failed": 0, "recovered": 5,  "successRate": 100.00 }
+  }
+}
+```
+
+- Rates and averages use **completed** operations only (`SUCCESS` + `FAILED`) — pending work
+  has no outcome yet.
+- `successRate = successful / completed`.
+- `recoveryRate = recovered / (recovered + failed)` — of the operations that hit at least one
+  failure, how many still succeeded.
+- Percentages are `BigDecimal`, rounded `HALF_UP` to 2 decimals; `0.00` when there is no data.
+
+### Error responses
+
+Every error uses the same shape (`ApiErrorResponse`); empty fields are omitted.
+
+`409 Conflict` — executing an operation that already finished:
+
+```json
+{
+  "timestamp": "2026-10-09T12:16:56.27159",
+  "status": 409,
+  "error": "Conflict",
+  "message": "Retry operation 102 cannot be executed because its status is SUCCESS",
+  "path": "/api/operations/102/execute"
+}
+```
+
+`400 Bad Request` — validation, one message per field (sorted):
+
+```json
+{
+  "timestamp": "2026-10-09T12:16:56.31317",
+  "status": 400,
+  "error": "Bad Request",
+  "message": "Validation failed",
+  "path": "/api/operations",
+  "fieldErrors": {
+    "failuresBeforeSuccess": "failuresBeforeSuccess must be at least 0",
+    "maxRetries": "maxRetries must be at least 1",
+    "operationName": "operationName is required"
+  }
+}
+```
+
+`400 Bad Request` — unknown enum value:
+
+```json
+{
+  "timestamp": "2026-10-09T12:16:56.325558",
+  "status": 400,
+  "error": "Bad Request",
+  "message": "Invalid value 'FAX' for field 'operationType'. Allowed values: [HTTP_CALL, PAYMENT, EMAIL, NOTIFICATION]",
+  "path": "/api/operations"
+}
+```
+
+`404 Not Found`:
+
+```json
+{
+  "timestamp": "2026-10-09T12:16:56.402113",
   "status": 404,
   "error": "Not Found",
-  "message": "Retry operation not found with id: 99",
-  "path": "/api/operations/99"
+  "message": "Retry operation not found with id: 9999",
+  "path": "/api/operations/9999"
 }
 ```
 
 ---
 
-## 10. Java & Spring Concepts Demonstrated
+## 9. PostgreSQL setup
 
-| Concept | Where it appears |
-|---------|------------------|
-| OOP, encapsulation | Entities, services, DTOs |
-| Enums | `OperationStatus`, `OperationType`, `AttemptStatus` |
-| Collections & Generics | `List<RetryAttempt>`, `Map<OperationType, Long>`, `JpaRepository<RetryOperation, Long>` |
-| Optional | `findById(...).orElseThrow(...)` |
-| Exceptions | Custom unchecked exceptions, global handler, simulated attempt failures |
-| java.time | `LocalDateTime`, `Duration` for execution timing |
-| Streams & Lambdas | Statistics: `filter`, `count`, `groupingBy`, `averagingInt`, `max` |
-| Method references | `RetryOperation::getTotalAttempts`, DTO mappers |
-| Concurrency | `Thread.sleep` in backoff; preventing double execution of one operation (Stage 10) |
-| Spring IoC / DI | Constructor-injected beans |
-| Spring MVC | `@RestController`, `@RequestMapping`, `ResponseEntity` |
-| Bean Validation | `@NotBlank`, `@Min`, `@Max`, `@Valid` |
-| Spring Data JPA | Derived queries, custom `@Query` |
-| Hibernate relationships | `@OneToMany(mappedBy = ...)`, `@ManyToOne(fetch = LAZY)` |
-| Transactions | `@Transactional` only where needed |
+1. Install PostgreSQL (any recent version) and make sure it listens on `localhost:5432`.
+2. Create the database (psql or pgAdmin):
+
+   ```sql
+   CREATE DATABASE retryguard;
+   ```
+
+3. Configure credentials. Copy the template and fill in your values:
+
+   ```powershell
+   Copy-Item .env.example .env
+   ```
+
+   ```properties
+   DB_URL=jdbc:postgresql://localhost:5432/retryguard
+   DB_USERNAME=postgres
+   DB_PASSWORD=your-password
+   ```
+
+   `.env` is git-ignored. `application.properties` imports it with
+   `spring.config.import=optional:file:.env[.properties]` and reads `${DB_URL}`,
+   `${DB_USERNAME}`, `${DB_PASSWORD}`; real environment variables with the same names
+   work too.
+
+4. No manual schema step: Hibernate creates and updates the tables on startup.
 
 ---
 
-## 11. Development Stages
+## 10. How to run
 
-| Stage | Goal | Commit message |
-|-------|------|----------------|
-| 0  | Project definition & architecture | `docs: define RetryGuard architecture` |
-| 1  | Spring Boot project setup, `GET /api/ping` | `feat: initialize RetryGuard Spring Boot project` |
-| 2  | PostgreSQL, `RetryOperation` entity, repository | `feat: configure PostgreSQL and retry operation entity` |
-| 3  | CRUD APIs with DTOs and validation | `feat: add retry operation CRUD APIs` |
-| 4  | Custom exceptions & global handler | `feat: add global exception handling` |
-| 5  | Retry execution engine (no backoff yet) | `feat: implement retry execution engine` |
-| 6  | Exponential backoff | `feat: add exponential retry backoff` |
-| 7  | `RetryAttempt` history | `feat: add retry attempt history` |
-| 8  | Execute endpoint | `feat: add retry execution API` |
-| 9  | Statistics with Streams | `feat: add retry statistics with streams` |
-| 10 | Concurrency review & hardening | `feat: harden retry execution for concurrent requests` |
-| 11 | Cleanup & transaction review | `refactor: clean up RetryGuard service design` |
-| 12 | Full Postman verification | `test: finalize RetryGuard verification` |
-| 13 | Final documentation | `docs: finalize RetryGuard documentation` |
+Requirements: **Java 21** and PostgreSQL. Maven is not needed — the Maven Wrapper downloads it.
+
+```powershell
+# run directly
+.\mvnw.cmd spring-boot:run
+
+# or build a jar and run it
+.\mvnw.cmd clean package
+java -jar target\retryguard-0.0.1-SNAPSHOT.jar
+```
+
+(macOS/Linux: `./mvnw` instead of `.\mvnw.cmd`.)
+
+The app starts on **port 8082**. Check it:
+
+```powershell
+Invoke-RestMethod http://localhost:8082/api/ping
+```
+
+Useful settings in `src/main/resources/application.properties`:
+
+| Property                          | Default | Purpose |
+|-----------------------------------|---------|---------|
+| `server.port`                     | `8082`  | HTTP port |
+| `retryguard.retry.max-delay-ms`   | `2000`  | Backoff cap (validated: 1–60000) |
+| `spring.jpa.show-sql`             | `true`  | Print generated SQL |
+| `spring.jpa.open-in-view`         | `false` | No lazy loading outside transactions |
+
+Each execution logs its progress, for example:
+
+```
+Executing operation 102 ('Charge payment #42'), up to 3 attempts
+Attempt 1/3 failed (transient): Simulated transient failure on attempt 1 (503 Service Unavailable)
+Waiting 100 ms before attempt 2
+...
+Operation 102 finished: SUCCESS after 3 attempt(s)
+```
+
+---
+
+## 11. How to test with Postman
+
+1. Start the application.
+2. In Postman: **Import** → `postman/RetryGuard.postman_collection.json`.
+3. Right-click the collection → **Run collection** → **Run RetryGuard**. It takes ~10 seconds.
+
+The collection has 14 scenario folders with automated `pm.test` assertions (181 checks).
+Every scenario creates its own data, so it runs on any database state and can be repeated.
+
+| #  | Scenario                                   | Key checks |
+|----|--------------------------------------------|------------|
+| 01 | Create operation                           | 201, `Location`, fields, starts `PENDING` |
+| 02 | Get operation                              | 200, list sorted by id |
+| 03 | Update operation                           | new config saved, `status`/`createdAt` unchanged |
+| 04 | Delete operation                           | 204, then 404 |
+| 05 | Succeeds immediately                       | 1 attempt, not recovered, no wait |
+| 06 | Fails once, then succeeds                  | 2 attempts, recovered, 300 ms wait |
+| 07 | Fails multiple times, then succeeds        | 4 of 5 attempts, 200/400/800 ms; second case proves the 2000 ms cap |
+| 08 | Exhausts retries                           | `FAILED` after exactly 3, no sleep after the last attempt |
+| 09 | Invalid retry configuration                | 400 for below-min, above-max, missing fields, bad enum, malformed JSON |
+| 10 | Non-existing operation                     | 404 for get / execute / attempts / update / delete |
+| 11 | Attempt history                            | count, order, statuses, errors, backoff gaps for every executed scenario |
+| 12 | Statistics                                 | every field equals an independent recount of the operation list |
+| 13 | Error responses                            | 400, 404, 405, 415, 409 in the standard format |
+| 14 | Repeated / concurrent execution            | 5 simultaneous executes → exactly one 200 and four 409s, one attempt set |
+
+Collection-level checks run on every response: no stack traces or exception text, and
+every error uses the `ApiErrorResponse` shape. Individual requests can also be sent by hand;
+the `baseUrl` collection variable defaults to `http://localhost:8082`.
+
+---
+
+## 12. Exception handling
+
+| Exception                                   | Type      | HTTP | Raised when |
+|---------------------------------------------|-----------|------|-------------|
+| `RetryOperationNotFoundException`           | custom    | 404  | id does not exist |
+| `InvalidOperationStateException`            | custom    | 409  | execute/update/delete in the wrong status |
+| `OptimisticLockingFailureException`         | Spring    | 409  | stale concurrent write (`@Version`) |
+| `MethodArgumentNotValidException`           | Spring    | 400  | Bean Validation failed |
+| `HttpMessageNotReadableException`           | Spring    | 400  | malformed JSON or unknown enum value |
+| `MethodArgumentTypeMismatchException`       | Spring    | 400  | e.g. `/api/operations/abc` |
+| `NoResourceFoundException`, method/media-type errors | Spring | 404 / 405 / 415 | unknown path, wrong method, non-JSON body |
+| any other `Exception`                       | —         | 500  | logged server-side; client gets a generic message |
+
+- One `@RestControllerAdvice` (`GlobalExceptionHandler`) maps everything to `ApiErrorResponse`
+  — controllers and services contain no try/catch for HTTP concerns.
+- All custom exceptions are **unchecked** (`RuntimeException`), so they pass through service
+  layers without `throws` clutter, and they also trigger transaction rollback by default.
+- **Exceptions drive the retry decision:** `TransientOperationException` means "retry";
+  any other `RuntimeException` from the action is treated as permanent and stops the loop.
+- **Checked exception handled correctly:** `Thread.sleep` throws `InterruptedException`;
+  the engine restores the interrupt flag (`Thread.currentThread().interrupt()`) and stops
+  retrying, reporting "Retry interrupted after attempt N; last error: …". It is never swallowed.
+- Unexpected errors are logged with their stack trace, but responses never contain one.
+
+---
+
+## 13. Transactions
+
+`@Transactional` is used only where several statements must succeed or fail together.
+
+| Method | Transaction | Why |
+|--------|-------------|-----|
+| `create`, `findAll`, `findById` | none (repository's own) | single statement |
+| `findAttempts` | `@Transactional(readOnly = true)` | existence check + query see consistent data; no dirty checking |
+| `update` | `@Transactional` | check status + change fields atomically; saved by **dirty checking**, no `save()` |
+| `delete` | `@Transactional` | check status + delete attempts + delete operation atomically |
+| `execute` | **three boundaries** (below) | must not hold a transaction while sleeping |
+
+Execution is split deliberately:
+
+1. **Claim** — one short transaction: `UPDATE … SET status = RUNNING WHERE id = ? AND status = PENDING`.
+   Committed immediately so concurrent requests see it.
+2. **Retry loop** — **no transaction**. It sleeps between attempts; an open transaction would
+   pin a pooled DB connection for seconds and could exhaust the pool.
+3. **Record outcome** — one transaction via `TransactionTemplate`: insert all attempts and set the
+   final status together. History and status can never disagree.
+
+`TransactionTemplate` is used for step 3 because `@Transactional` on a method called from the
+same class is ignored (the call bypasses Spring's proxy).
+
+---
+
+## 14. Concurrency decisions
+
+Spring MVC serves each request on its own thread, so two clients (or a double-click) can
+execute the same operation at the same time. Before Stage 10 this was reproduced: 8 concurrent
+executes ran 8 retry loops and 7 crashed on the unique constraint.
+
+| Decision | How | Effect |
+|----------|-----|--------|
+| **Atomic claim** | conditional `UPDATE … WHERE status = 'PENDING'`; the returned row count decides the winner | exactly one request runs the loop; the rest get `409` |
+| **Optimistic locking** | `@Version` column; every update checks and increments it | stale writes (e.g. update racing an execute) fail with `409` instead of silently overwriting |
+| **Unique constraint** | `(operation_id, attempt_number)` | last line of defence: the database refuses duplicate history |
+| **Stateless singletons** | services hold only final, injected dependencies | safe to share across request threads, no locks needed |
+| **No in-memory locks** | no `synchronized`/`ReentrantLock` | correctness comes from the database, so it would still hold across multiple JVMs |
+| **Interrupt handling** | `InterruptedException` restores the flag and stops retrying | threads can be shut down cleanly |
+| **Crash recovery** | on `ApplicationReadyEvent`, `RUNNING` rows are marked `FAILED` | an operation cut off by a crash never stays stuck |
+
+**Why no thread pool / async execution:** the retry loop runs synchronously in the request
+thread. That keeps the API simple (the response contains the final result) and avoids
+background-job state. The trade-off is that a long execution occupies a server thread while
+it sleeps — acceptable here because delays are validated and capped. `ExecutorService`,
+`Callable`, `Future`, and `CountDownLatch` were used only in throwaway verification harnesses
+to fire concurrent requests, not in production code.
+
+Verified in Stage 12: 5 simultaneous executes → one `200`, four `409`, exactly one set of 3 attempts.
+
+---
+
+## 15. Streams and lambdas
+
+`RetryStatisticsService` computes all statistics with Streams:
+
+| Statistic | Stream operation |
+|-----------|------------------|
+| completed operations | `filter(RetryStatisticsService::isCompleted).toList()` |
+| counts per status | `groupingBy(getStatus, () -> new EnumMap<>(…), counting())` |
+| recovered / first-attempt successes | `filter(...).count()` |
+| total / max attempts | `mapToInt(RetryOperation::getTotalAttempts).sum()` / `.max().orElse(0)` |
+| average attempts | `collect(averagingInt(RetryOperation::getTotalAttempts))` |
+| attempt distribution | `groupingBy(getTotalAttempts, TreeMap::new, counting())` (sorted keys) |
+| per-type breakdown | `groupingBy(getOperationType, EnumMap…, collectingAndThen(toList(), …))` |
+
+Elsewhere:
+
+- `RetryEngine.run(..., IntConsumer action)` takes the operation as a lambda:
+  `attempt -> simulator.call(running, attempt)` — the engine is reusable and testable.
+- Entity → DTO mapping: `.stream().map(RetryOperationResponse::from).toList()`.
+- Attempt records → entities in `RetryExecutionService.toEntities` via `stream().map(...)`.
+- `Optional`: `repository.findById(id).orElseThrow(() -> new RetryOperationNotFoundException(id))`.
+
+---
+
+## 16. Concepts demonstrated
+
+### Java
+
+| Concept | Where |
+|---------|-------|
+| OOP / encapsulation | entities expose behaviour (`markSucceeded`, `markFailed`), not raw setters for state |
+| Records | all DTOs, `RetryOutcome`, `AttemptRecord`, `RetryProperties` |
+| Enums | `OperationStatus`, `OperationType`, `AttemptStatus` |
+| Collections | `List.copyOf` (immutable outcome), `EnumMap`, `TreeMap` |
+| Generics | `JpaRepository<RetryOperation, Long>`, `Map<OperationType, TypeStatistics>` |
+| Optional | `findById(...).orElseThrow(...)` |
+| Checked vs unchecked exceptions | custom unchecked exceptions; checked `InterruptedException` handled |
+| Functional interfaces / lambdas | `IntConsumer` action passed to `RetryEngine` |
+| Method references | `RetryOperation::getTotalAttempts`, `RetryOperationResponse::from` |
+| Streams | statistics, mapping |
+| `BigDecimal` | percentages with `RoundingMode.HALF_UP` |
+| `java.time` | `LocalDateTime`, `Duration.between`, injected `Clock` (microsecond ticks to match PostgreSQL) |
+| Bit shifting / overflow safety | `BackoffCalculator` |
+| Text blocks | JPQL queries |
+| Pattern matching `instanceof` | enum error detection in `GlobalExceptionHandler` |
+| Threads | `Thread.sleep`, interrupt flag, request-thread model |
+
+### Spring
+
+| Concept | Where |
+|---------|-------|
+| IoC / constructor dependency injection | every bean |
+| Stereotypes | `@RestController`, `@Service`, `@Component`, `@Configuration`, `@Bean` |
+| Spring MVC | `@RequestMapping`, `@PathVariable`, `@RequestBody`, `ResponseEntity`, `Location` header |
+| Bean Validation | `@Valid`, `@NotBlank`, `@Size`, `@Min`, `@Max`, `@NotNull` |
+| Global error handling | `@RestControllerAdvice`, `@ExceptionHandler` |
+| Type-safe configuration | `@ConfigurationProperties` record + `@Validated` (fail-fast at startup) |
+| Transactions | `@Transactional`, `readOnly`, `TransactionTemplate`, proxy self-invocation pitfall |
+| Application events | `@EventListener(ApplicationReadyEvent.class)` |
+| Externalised config | `.env` import, `${...}` placeholders |
+
+### JPA / Hibernate
+
+| Concept | Where |
+|---------|-------|
+| Entity mapping | `@Entity`, `@Table`, `@Column`, `@Id`, `GenerationType.IDENTITY` |
+| Enum mapping | `@Enumerated(EnumType.STRING)` |
+| Relationships | `@ManyToOne(fetch = LAZY)` owning side, `@OneToMany(mappedBy, cascade = REMOVE)` |
+| Constraints | `@UniqueConstraint`, `nullable = false`, lengths |
+| Optimistic locking | `@Version` + `@ColumnDefault("0")` |
+| Persistence context / dirty checking | `update` and outcome recording without `save()` |
+| Custom JPQL | `@Query` fetch by foreign key; `@Modifying` bulk updates with `clearAutomatically` |
+| Open-in-view disabled | lazy loading cannot leak into the web layer |
+
+---
+
+## 17. Limitations
+
+Honest boundaries of this project:
+
+- **Simulated failures only** — no real external API calls.
+- **Synchronous execution** — a long execution holds a request thread while sleeping.
+- **Single instance assumed** for crash recovery: on startup every `RUNNING` row is marked
+  `FAILED`, which would be wrong if another instance were still executing it.
+- **No jitter** in the backoff (random spread used in large systems to de-synchronise clients).
+- **No unit-test suite** — verification is end-to-end via the Postman collection (plus
+  throwaway harnesses during development).
+- **No authentication** — out of scope for this project.
+- **Schema via `ddl-auto=update`** — fine for a demo; a production system would use versioned
+  migrations.
+
+---
+
+## 18. Development history
+
+Built in small, verified stages — one commit each.
+
+| Stage | Goal | Commit |
+|-------|------|--------|
+| 0  | Project definition and architecture | Defined RetryGuard architecture |
+| 1  | Spring Boot setup, `GET /api/ping` | Initialized RetryGuard Spring Boot project |
+| 2  | PostgreSQL, `RetryOperation` entity | Configured PostgreSQL and retry operation entity |
+| 3  | CRUD APIs, DTOs, validation | Added retry operation CRUD APIs |
+| 4  | Custom exceptions, global handler | Added global exception handling |
+| 5  | Retry engine | Implemented retry execution engine |
+| 6  | Exponential backoff | Added exponential retry backoff |
+| 7  | `RetryAttempt` history | Added retry attempt history |
+| 8  | Execute endpoint | Added retry execution API |
+| 9  | Statistics with Streams | Added retry statistics with streams |
+| 10 | Concurrency hardening | Hardened retry execution for concurrent requests |
+| 11 | Service cleanup, transaction review | Cleaned up RetryGuard service design |
+| 12 | Full Postman verification | Finalized RetryGuard verification |
+| 13 | Final documentation | Finalized RetryGuard documentation |
