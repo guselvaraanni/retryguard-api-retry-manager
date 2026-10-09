@@ -6,6 +6,7 @@ import java.util.List;
 
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import com.retryguard.dto.RetryAttemptResponse;
 import com.retryguard.dto.RetryOperationRequest;
@@ -53,6 +54,7 @@ public class RetryOperationService {
         return RetryOperationResponse.from(findOperationOrThrow(id));
     }
 
+    @Transactional(readOnly = true)
     public List<RetryAttemptResponse> findAttempts(Long id) {
         if (!repository.existsById(id)) {
             throw new RetryOperationNotFoundException(id);
@@ -62,19 +64,23 @@ public class RetryOperationService {
                 .toList();
     }
 
+    @Transactional
     public RetryOperationResponse update(Long id, RetryOperationRequest request) {
         RetryOperation operation = findOperationOrThrow(id);
         if (operation.getStatus() != OperationStatus.PENDING) {
             throw new InvalidOperationStateException(id, operation.getStatus(), "updated");
         }
+        // The entity is managed inside this transaction: Hibernate's dirty checking
+        // writes these changes on commit, so no explicit save() is needed.
         operation.setOperationName(request.operationName().trim());
         operation.setOperationType(request.operationType());
         operation.setMaxRetries(request.maxRetries());
         operation.setInitialDelayMs(request.initialDelayMs());
         operation.setFailuresBeforeSuccess(request.failuresBeforeSuccess());
-        return RetryOperationResponse.from(repository.save(operation));
+        return RetryOperationResponse.from(operation);
     }
 
+    @Transactional
     public void delete(Long id) {
         RetryOperation operation = findOperationOrThrow(id);
         if (operation.getStatus() == OperationStatus.RUNNING) {

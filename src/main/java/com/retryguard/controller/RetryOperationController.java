@@ -29,21 +29,21 @@ import jakarta.validation.Valid;
 @RequestMapping("/api/operations")
 public class RetryOperationController {
 
-    private final RetryOperationService service;
+    private final RetryOperationService operationService;
     private final RetryExecutionService executionService;
     private final RetryStatisticsService statisticsService;
 
-    public RetryOperationController(RetryOperationService service,
+    public RetryOperationController(RetryOperationService operationService,
                                     RetryExecutionService executionService,
                                     RetryStatisticsService statisticsService) {
-        this.service = service;
+        this.operationService = operationService;
         this.executionService = executionService;
         this.statisticsService = statisticsService;
     }
 
     @PostMapping
     public ResponseEntity<RetryOperationResponse> create(@Valid @RequestBody RetryOperationRequest request) {
-        RetryOperationResponse created = service.create(request);
+        RetryOperationResponse created = operationService.create(request);
         URI location = ServletUriComponentsBuilder.fromCurrentRequest()
                 .path("/{id}")
                 .buildAndExpand(created.id())
@@ -53,7 +53,7 @@ public class RetryOperationController {
 
     @GetMapping
     public List<RetryOperationResponse> findAll() {
-        return service.findAll();
+        return operationService.findAll();
     }
 
     @GetMapping("/statistics")
@@ -63,7 +63,7 @@ public class RetryOperationController {
 
     @GetMapping("/{id}")
     public RetryOperationResponse findById(@PathVariable Long id) {
-        return service.findById(id);
+        return operationService.findById(id);
     }
 
     @PostMapping("/{id}/execute")
@@ -73,18 +73,18 @@ public class RetryOperationController {
 
     @GetMapping("/{id}/attempts")
     public List<RetryAttemptResponse> findAttempts(@PathVariable Long id) {
-        return service.findAttempts(id);
+        return operationService.findAttempts(id);
     }
 
     @PutMapping("/{id}")
     public RetryOperationResponse update(@PathVariable Long id,
                                          @Valid @RequestBody RetryOperationRequest request) {
-        return service.update(id, request);
+        return operationService.update(id, request);
     }
 
     @DeleteMapping("/{id}")
     public ResponseEntity<Void> delete(@PathVariable Long id) {
-        service.delete(id);
+        operationService.delete(id);
         return ResponseEntity.noContent().build();
     }
 }

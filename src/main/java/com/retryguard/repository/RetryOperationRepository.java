@@ -33,4 +33,17 @@ public interface RetryOperationRepository extends JpaRepository<RetryOperation, 
               and o.status = com.retryguard.entity.OperationStatus.PENDING
             """)
     int claimForExecution(@Param("id") Long id, @Param("startedAt") LocalDateTime startedAt);
+
+    @Transactional
+    @Modifying
+    @Query("""
+            update RetryOperation o
+            set o.status = com.retryguard.entity.OperationStatus.FAILED,
+                o.completedAt = :completedAt,
+                o.lastError = :reason,
+                o.recovered = false,
+                o.version = o.version + 1
+            where o.status = com.retryguard.entity.OperationStatus.RUNNING
+            """)
+    int failAllRunning(@Param("completedAt") LocalDateTime completedAt, @Param("reason") String reason);
 }
