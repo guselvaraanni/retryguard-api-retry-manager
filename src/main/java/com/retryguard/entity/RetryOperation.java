@@ -4,6 +4,8 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.hibernate.annotations.ColumnDefault;
+
 import com.retryguard.util.TextUtils;
 
 import jakarta.persistence.CascadeType;
@@ -16,6 +18,7 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.OneToMany;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 
 @Entity
 @Table(name = "retry_operations")
@@ -65,6 +68,12 @@ public class RetryOperation {
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;
 
+    // Default 0 lets Hibernate add this NOT NULL column to a table that already has rows.
+    @Version
+    @ColumnDefault("0")
+    @Column(name = "version", nullable = false)
+    private long version;
+
     // Inverse side: RetryAttempt.retryOperation owns the foreign key. Mapped so that deleting
     // an operation also deletes its attempts; attempts are read via RetryAttemptRepository.
     @OneToMany(mappedBy = "retryOperation", cascade = CascadeType.REMOVE)
@@ -88,15 +97,6 @@ public class RetryOperation {
         this.createdAt = createdAt;
         this.status = OperationStatus.PENDING;
         this.totalAttempts = 0;
-        this.recovered = false;
-    }
-
-    public void markRunning(LocalDateTime startedAt) {
-        this.status = OperationStatus.RUNNING;
-        this.startedAt = startedAt;
-        this.completedAt = null;
-        this.totalAttempts = 0;
-        this.lastError = null;
         this.recovered = false;
     }
 

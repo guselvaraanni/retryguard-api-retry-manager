@@ -8,7 +8,6 @@ import org.springframework.stereotype.Service;
 
 import com.retryguard.dto.ExecutionResultResponse;
 import com.retryguard.entity.AttemptStatus;
-import com.retryguard.entity.OperationStatus;
 import com.retryguard.entity.RetryAttempt;
 import com.retryguard.entity.RetryOperation;
 import com.retryguard.exception.InvalidOperationStateException;
@@ -40,13 +39,12 @@ public class RetryExecutionService {
     }
 
     public ExecutionResultResponse execute(Long id) {
-        RetryOperation operation = operationService.findOperationOrThrow(id);
-        if (operation.getStatus() != OperationStatus.PENDING) {
-            throw new InvalidOperationStateException(id, operation.getStatus(), "executed");
+        int claimed = operationRepository.claimForExecution(id, LocalDateTime.now(clock));
+        if (claimed == 0) {
+            RetryOperation existing = operationService.findOperationOrThrow(id);
+            throw new InvalidOperationStateException(id, existing.getStatus(), "executed");
         }
-
-        operation.markRunning(LocalDateTime.now(clock));
-        RetryOperation running = operationRepository.save(operation);
+        RetryOperation running = operationService.findOperationOrThrow(id);
 
         RetryOutcome outcome = retryEngine.run(
                 running.getMaxRetries(),

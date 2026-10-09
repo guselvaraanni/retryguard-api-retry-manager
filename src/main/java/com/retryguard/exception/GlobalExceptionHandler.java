@@ -8,6 +8,7 @@ import java.util.TreeMap;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ResponseEntity;
@@ -47,6 +48,14 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiErrorResponse> handleInvalidState(InvalidOperationStateException ex,
                                                                HttpServletRequest request) {
         return build(HttpStatus.CONFLICT, ex.getMessage(), request, null);
+    }
+
+    @ExceptionHandler(OptimisticLockingFailureException.class)
+    public ResponseEntity<ApiErrorResponse> handleConcurrentModification(OptimisticLockingFailureException ex,
+                                                                         HttpServletRequest request) {
+        return build(HttpStatus.CONFLICT,
+                "The retry operation was modified by another request. Reload it and try again.",
+                request, null);
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
